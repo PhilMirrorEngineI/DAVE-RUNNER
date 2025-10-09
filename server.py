@@ -1,32 +1,24 @@
 import os, re, time, uuid, sqlite3, json
 from flask import Flask, request, jsonify, g, Response
 from functools import wraps
+from pathlib import Path
 
-# ── Config ────────────────────────────────────────────────────────────────────
 MEMORY_API_KEY  = os.environ.get("MEMORY_API_KEY", "").strip()
-ALLOWED_ORIGIN  = os.environ.get("ALLOWED_ORIGIN", "*")  # e.g. https://your-app.vercel.app
-DEFAULT_DB_PATH = "/var/data/dave.sqlite3" if os.path.isdir("/var/data") else "./dave.sqlite3"
+ALLOWED_ORIGIN  = os.environ.get("ALLOWED_ORIGIN", "*")
+
+# Use local file by default (works without a Render Disk)
+DEFAULT_DB_PATH = "./data/dave.sqlite3"
 DB_PATH         = os.environ.get("DB_PATH", DEFAULT_DB_PATH)
 OPENAPI_PATH    = os.environ.get("OPENAPI_PATH", "./openapi.json")
 
 app = Flask(__name__)
 
-# ── Auth decorator (place before routes) ──────────────────────────────────────
-def require_key(fn):
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        # Allow public routes + CORS preflight
-        if request.method == "OPTIONS" or request.path in ("/", "/health", "/healthz", "/openapi.json"):
-            return fn(*args, **kwargs)
-        key = request.headers.get("X-API-KEY", "")
-        if not key or key != MEMORY_API_KEY:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
-        return fn(*args, **kwargs)
-    return wrapped
+def _ensure_parent_dir(path: str):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
 def get_db():
     if "db" not in g:
+        _ensure_parent_dir(DB_PATH)
         g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
         g.db.row_factory = sqlite3.Row
     return g.db
