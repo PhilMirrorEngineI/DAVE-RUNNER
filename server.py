@@ -174,9 +174,11 @@ def latest_memory():
     return jsonify(dict(row)), 200
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-@app.before_first_request
+@app.before_request
 def _ready():
-    init_db()
+    if not hasattr(app, "_db_ready"):
+        init_db()
+        app._db_ready = True
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
