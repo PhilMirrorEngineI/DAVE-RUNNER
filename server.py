@@ -1,3 +1,4 @@
+# server.py — DavePMEi Memory API (hardened but fully compatible)
 import os, re, time, uuid, sqlite3, json
 from flask import Flask, request, jsonify, g, Response
 from functools import wraps
@@ -5,8 +6,8 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MEMORY_API_KEY  = os.environ.get("MEMORY_API_KEY", "").strip()
-ALLOWED_ORIGIN  = os.environ.get("ALLOWED_ORIGIN", "*")  # e.g. https://your-app.vercel.app
-DEFAULT_DB_PATH = os.environ.get("DB_PATH", "/var/data/dave.sqlite3")  # set via Render Disk or env
+ALLOWED_ORIGIN  = os.environ.get("ALLOWED_ORIGIN", "*")  # comma-separate for multiple origins
+DEFAULT_DB_PATH = os.environ.get("DB_PATH", "/var/data/dave.sqlite3")  # persistent disk on Render
 OPENAPI_PATH    = os.environ.get("OPENAPI_PATH", "./openapi.json")
 
 app = Flask(__name__)
@@ -70,10 +71,25 @@ def handle_error(e):
 
 @app.after_request
 def add_cors(resp):
-    resp.headers["Access-Control-Allow-Origin"]  = ALLOWED_ORIGIN
+    # Multi-origin support: comma-separated list, wildcard allowed
+    origins = [o.strip() for o in (ALLOWED_ORIGIN or "*").split(",")]
+    req_origin = request.headers.get("Origin", "")
+    allow = None
+    if len(origins) > 1 and req_origin:
+        for pattern in origins:
+            regex = "^" + re.escape(pattern).replace("\\*", ".*") + "$"
+            if re.match(regex, req_origin):
+                allow = req_origin
+                break
+    resp.headers["Access-Control-Allow-Origin"] = allow or ALLOWED_ORIGIN
+    resp.headers["Vary"] = "Origin"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-KEY"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    # no-store on reads so clients always see latest
+    if request.path in ("/get_memory", "/latest_memory"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Pragma"] = "no-cache"
     return resp
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -141,7 +157,12 @@ def get_memory():
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
 
-    limit     = max(1, min(int(request.args.get("limit", 10)), 200))
+    limit_raw = request.args.get("limit", "10")
+    try:
+        limit = max(1, min(int(limit_raw), 200))
+    except ValueError:
+        return jsonify({"ok": False, "error": "limit must be an integer"}), 400
+
     user_id   = request.args.get("user_id")
     thread_id = request.args.get("thread_id")
     slide_id  = request.args.get("slide_id")
@@ -181,9 +202,7 @@ def latest_memory():
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.before_request
 def _ensure_ready():
-    # initialize lazily: first real request
-    # (safe to call repeatedly)
-    init_db()
+    init_db()  # idempotent
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
