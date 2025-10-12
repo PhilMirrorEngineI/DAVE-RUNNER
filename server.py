@@ -1,4 +1,4 @@
-# server.py — DavePMEi Memory API (hardened but fully compatible)
+# server.py — DavePMEi Memory API (synced with Function Runner)
 import os, re, time, uuid, sqlite3, json
 from flask import Flask, request, jsonify, g, Response
 from functools import wraps
@@ -16,6 +16,14 @@ app = Flask(__name__)
 def _ensure_parent_dir(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
+def _auth_header_matches() -> bool:
+    """Accept X-API-Key, X-API-KEY, or Authorization: Bearer <key>."""
+    key1 = request.headers.get("X-API-Key", "")
+    key2 = request.headers.get("X-API-KEY", "")
+    auth = request.headers.get("Authorization", "")
+    bear = auth.split(" ", 1)[1].strip() if auth.startswith("Bearer ") and len(auth.split(" ", 1)) == 2 else ""
+    return any(k == MEMORY_API_KEY for k in (key1, key2, bear))
+
 # ── Auth decorator (DEFINE BEFORE ANY ROUTES THAT USE IT) ─────────────────────
 def require_key(fn):
     @wraps(fn)
@@ -23,8 +31,9 @@ def require_key(fn):
         # allow public routes & preflight
         if request.method == "OPTIONS" or request.path in ("/", "/health", "/healthz", "/openapi.json"):
             return fn(*args, **kwargs)
-        key = request.headers.get("X-API-KEY", "")
-        if not key or key != MEMORY_API_KEY:
+        if not MEMORY_API_KEY:
+            return jsonify({"ok": False, "error": "Server misconfigured: missing MEMORY_API_KEY"}), 500
+        if not _auth_header_matches():
             return jsonify({"ok": False, "error": "Unauthorized"}), 401
         return fn(*args, **kwargs)
     return wrapped
@@ -48,6 +57,7 @@ def init_db():
             glyph_echo  TEXT    NOT NULL,
             drift_score REAL    NOT NULL,
             seal        TEXT    NOT NULL,
+            role        TEXT    NOT NULL,      -- NEW: store role for Runner sync
             content     TEXT    NOT NULL,
             ts          INTEGER NOT NULL
         );
@@ -83,7 +93,7 @@ def add_cors(resp):
                 break
     resp.headers["Access-Control-Allow-Origin"] = allow or ALLOWED_ORIGIN
     resp.headers["Vary"] = "Origin"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-KEY"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-API-KEY, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Content-Type"] = "application/json; charset=utf-8"
     # no-store on reads so clients always see latest
@@ -120,33 +130,38 @@ def openapi_file():
 def save_memory():
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
+
     data = request.get_json(silent=True) or {}
-    required = ["user_id","thread_id","slide_id","glyph_echo","drift_score","seal","content"]
-    missing = [k for k in required if k not in data]
-    if missing:
-        return jsonify({"ok": False, "error": f"Missing fields: {missing}"}), 400
+
+    # Accept both FULL and MINIMAL payloads (Runner sends minimal at times)
+    # FULL required set for legacy/strict:
+    full_required = ["user_id","thread_id","slide_id","glyph_echo","drift_score","seal","content"]
+    # If not full, map defaults so insert always succeeds
+    user_id     = str(data.get("user_id", "")).strip()
+    content     = str(data.get("content", "")).strip()
+    role        = str(data.get("role", "assistant")).strip() or "assistant"
+
+    if not user_id or not content:
+        return jsonify({"ok": False, "error": "Missing user_id or content"}), 400
+
+    thread_id   = str(data.get("thread_id", "general")).strip() or "general"
+    slide_id    = str(data.get("slide_id", str(uuid.uuid4()))).strip()
+    glyph_echo  = str(data.get("glyph_echo", "🪞")).strip() or "🪞"
+    drift_score = float(data.get("drift_score", 0.05))
+    seal        = str(data.get("seal", "lawful")).strip() or "lawful"
 
     ts = int(time.time())
     db = get_db()
     db.execute(
-        """INSERT INTO memories (user_id, thread_id, slide_id, glyph_echo, drift_score, seal, content, ts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            str(data["user_id"]),
-            str(data["thread_id"]),
-            str(data["slide_id"]),
-            str(data["glyph_echo"]),
-            float(data["drift_score"]),
-            str(data["seal"]),
-            str(data["content"]),
-            ts
-        )
+        """INSERT INTO memories (user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts)
     )
     db.commit()
     return jsonify({
         "ok": True,
         "status": "ok",
-        "slide_id": data["slide_id"],
+        "slide_id": slide_id,
         "ts": ts,
         "request_id": str(uuid.uuid4())
     }), 200
@@ -167,16 +182,18 @@ def get_memory():
     thread_id = request.args.get("thread_id")
     slide_id  = request.args.get("slide_id")
     seal      = request.args.get("seal")
+    role      = request.args.get("role")
 
     clauses, params = [], []
     if user_id:   clauses.append("user_id = ?");   params.append(user_id)
     if thread_id: clauses.append("thread_id = ?"); params.append(thread_id)
     if slide_id:  clauses.append("slide_id = ?");  params.append(slide_id)
     if seal:      clauses.append("seal = ?");      params.append(seal)
+    if role:      clauses.append("role = ?");      params.append(role)
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""
-        SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, content, ts
+        SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts
         FROM memories
         {where_sql}
         ORDER BY ts DESC
@@ -192,7 +209,7 @@ def get_memory():
 @require_key
 def latest_memory():
     row = get_db().execute(
-        "SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, content, ts "
+        "SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts "
         "FROM memories ORDER BY ts DESC LIMIT 1;"
     ).fetchone()
     if not row:
