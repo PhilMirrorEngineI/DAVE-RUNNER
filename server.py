@@ -1,204 +1,388 @@
-# runner.py — Dave Runner (Assistants tool-loop → PMEi Memory API)
-# Aligns to X-API-KEY only
+# server.py — Dave Runner (PMEi) — full modular rebuild
+# Start with:
+#   gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
+#
+# Endpoints:
+#   GET  /               -> service info
+#   GET  /health, /healthz
+#   POST /chat           -> simple echo (cheap & predictable)
+#   POST /reflect        -> PMEi lawful reflection (drift scoring + glyph/slide echo)
+#   POST /openai/chat    -> OpenAI chat completion (requires OPENAI_API_KEY)
+#   POST /image/generate -> OpenAI image generation (base64; requires OPENAI_API_KEY)
+#   POST /memory/save    -> passthrough to MEMORY_BASE_URL/save_memory   (X-API-KEY)
+#   POST /memory/get     -> passthrough to MEMORY_BASE_URL/get_memory    (X-API-KEY)
+#
+# Env (all optional except OPENAI_API_KEY for /openai and /image):
+#   OPENAI_API_KEY   = <key>
+#   OPENAI_MODEL     = gpt-4o-mini (default)  # chat endpoint default
+#   OPENAI_IMAGE_MODEL = gpt-image-1 (default)
+#   TAVILY_API_KEY   = <key>  # reserved (not used in this file)
+#   MEMORY_BASE_URL  = https://davepmei-ai.onrender.com   # no trailing slash
+#   MEMORY_API_KEY   = <secret>  # sent as X-API-KEY
+#   DATABASE_URL     = <postgres url>  # reserved (not used in this file)
+#
+# Notes:
+# - Safe JSON parsing, robust error handling, and tight timeouts.
+# - No trailing slash bug on MEMORY_BASE_URL (we rstrip("/")).
+# - Image responses are base64 strings; no file writes.
+# - Keep payload sizes sane to avoid timeouts + costs.
 
 import os
-import time
+import io
 import json
-import shlex
+import time
+import base64
+from typing import Any, Dict, Optional, Tuple
+
 import requests
-from typing import Dict, Any, Tuple, List
 from flask import Flask, request, jsonify
-from openai import OpenAI
 
-# ── Env ──────────────────────────────────────────────────────────────────────
-OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
-ASSISTANT_ID    = os.environ["ASSISTANT_ID"]  # Playground / GPT Editor Assistant ID
-MEMORY_BASE_URL = (os.environ.get("MEMORY_BASE_URL", "") or "").rstrip("/")
-MEMORY_API_KEY  = os.environ.get("MEMORY_API_KEY", "")
+# Optional OpenAI (only initialized if key is present)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1"
 
-SAVE_REPLIES    = os.environ.get("SAVE_REPLIES", "true").lower() == "true"
-POLL_SLEEP_SECS = float(os.environ.get("POLL_SLEEP_SECS", "0.6"))
-POLL_MAX_SECS   = int(os.environ.get("POLL_MAX_SECS", "60"))
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI  # openai>=1.x/2.x
+        _openai_client: Optional["OpenAI"] = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as _e:  # Import errors shouldn’t crash the service
+        _openai_client = None
+else:
+    _openai_client = None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Memory API passthrough config
+MEMORY_BASE_URL = (os.getenv("MEMORY_BASE_URL") or "").rstrip("/")
+MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "").strip()
+
+# Reserved (not used in this file but kept for parity with the 400-liner)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# Flask app
 app = Flask(__name__)
+BOOT_TS = int(time.time())
 
-# ── Utils ────────────────────────────────────────────────────────────────────
-def parse_message_kv(message: str) -> dict:
-    """Parse key=value pairs; respects quotes via shlex."""
-    args = {}
-    for tok in shlex.split(message or ""):
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            args[k.strip()] = v.strip()
-    return args
 
-def mem_call(path: str, method: str = "GET", params: dict | None = None, body: dict | None = None):
-    """HTTP to Memory API using X-API-KEY header (canonical)."""
-    if not MEMORY_BASE_URL:
-        raise RuntimeError("MEMORY_BASE_URL not configured")
-    if not MEMORY_API_KEY:
-        raise RuntimeError("MEMORY_API_KEY not configured")
+# --------------------------
+# Helpers
+# --------------------------
+def _jfail(message: str, http: int = 400, **extra):
+    payload = {"ok": False, "error": message}
+    if extra:
+        payload.update(extra)
+    return jsonify(payload), http
 
-    url = f"{MEMORY_BASE_URL}{path}"
-    headers = {"X-API-KEY": MEMORY_API_KEY, "Content-Type": "application/json"}
-    if method.upper() == "GET":
-        r = requests.get(url, headers=headers, params=params or {}, timeout=20)
-    else:
-        r = requests.post(url, headers=headers, json=body or {}, timeout=20)
-    r.raise_for_status()
-    return r.json() if r.content else {}
 
-# ── Tool bridge (maps Assistant tool calls → Memory API) ─────────────────────
-def handle_tool_call(tc) -> Tuple[str, str]:
-    """
-    Supports either:
-      - Unified function: function_runner(message="operation=... user_id=...")
-      - Direct tool names: get_memory / recall_memory_window / memory_bridge / save_memory / reflect_and_store_memory
-    Returns: (tool_call_id, output_json_string)
-    """
-    name = getattr(tc.function, "name", "") or ""
-    raw_args = json.loads(getattr(tc.function, "arguments", "") or "{}")
+def _jok(data: Any = None, **extra):
+    payload = {"ok": True}
+    if data is not None:
+        payload["data"] = data
+    if extra:
+        payload.update(extra)
+    return jsonify(payload)
 
-    # If unified, peel 'message' and parse KV
-    if name == "function_runner":
-        args = parse_message_kv(raw_args.get("message", ""))
-    else:
-        args = dict(raw_args)
 
-    # Defaults that won't override explicit args
-    defaults = {
-        "slide_id": "t-001",
-        "glyph_echo": "🪞",
-        "drift_score": 0.05,
-        "seal": "lawful",
-        "limit": 5,
-        "content": "(no content provided)",
+def _get_json() -> Tuple[Optional[dict], Optional[Tuple[Any, int]]]:
+    try:
+        data = request.get_json(force=True) or {}
+        if not isinstance(data, dict):
+            return None, _jfail("JSON body must be an object", 400)
+        return data, None
+    except Exception:
+        return None, _jfail("Invalid or missing JSON body", 400)
+
+
+def _mem_enabled() -> bool:
+    return bool(MEMORY_BASE_URL and MEMORY_API_KEY)
+
+
+def _mem_headers() -> Dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "X-API-KEY": MEMORY_API_KEY,  # Header expected by your Memory API
     }
-    for k, v in defaults.items():
-        args.setdefault(k, v)
 
-    operation = (args.get("operation") or name or "").strip().lower()
 
-    # READ
-    if operation in ("memory_bridge", "get_memory", "recall_memory_window"):
-        params = {k: args.get(k) for k in ("user_id", "thread_id", "limit") if args.get(k)}
-        out = mem_call("/get_memory", "GET", params=params)
-        return tc.id, json.dumps(out)
+def _safe_upstream_json(resp: requests.Response) -> Any:
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw": resp.text[:2000], "status": resp.status_code}
 
-    # WRITE
-    if operation in ("save_memory", "reflect_and_store_memory"):
-        body = {
-            "user_id":     args.get("user_id", ""),
-            "thread_id":   args.get("thread_id", "") or "assistant-run",
-            "slide_id":    args.get("slide_id"),
-            "glyph_echo":  args.get("glyph_echo"),
-            "drift_score": float(args.get("drift_score") or 0.0),
-            "seal":        args.get("seal"),
-            "content":     args.get("content"),
-        }
-        out = mem_call("/save_memory", "POST", body=body)
-        return tc.id, json.dumps(out)
 
-    return tc.id, json.dumps({"ok": False, "error": f"unknown operation '{operation}'", "received": {"name": name, "args": args}})
+def _clip(s: str, limit: int) -> str:
+    if not s:
+        return s
+    return s if len(s) <= limit else (s[:limit] + f"... [clipped {len(s)-limit} chars]")
 
-# ── Run one Assistants session with tool loop ────────────────────────────────
-def run_once(user_msg: str) -> str:
-    """Create thread, post user message, start run, process tools, return last assistant text."""
-    # Thread + msg
-    th = client.beta.threads.create()
-    client.beta.threads.messages.create(th.id, role="user", content=user_msg)
 
-    # Start run
-    run = client.beta.threads.runs.create(
-        thread_id=th.id,
-        assistant_id=ASSISTANT_ID,
-        tool_choice="auto",
-    )
+def _bool(val: Any, default: bool = False) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return True
+        if v in ("0", "false", "no", "n", "off"):
+            return False
+    return default
 
-    t0 = time.time()
-    while True:
-        run = client.beta.threads.runs.retrieve(thread_id=th.id, run_id=run.id)
-        status = run.status
 
-        if status == "requires_action":
-            calls = run.required_action.submit_tool_outputs.tool_calls
-            outs = []
-            for tc in calls:
-                try:
-                    tid, output = handle_tool_call(tc)
-                except Exception as e:
-                    tid = tc.id
-                    output = json.dumps({"ok": False, "error": f"runner exception: {e}"})
-                outs.append({"tool_call_id": tid, "output": output})
-            run = client.beta.threads.runs.submit_tool_outputs(
-                thread_id=th.id,
-                run_id=run.id,
-                tool_outputs=outs
-            )
-
-        elif status in ("completed", "failed", "cancelled", "expired"):
-            break
-
-        if time.time() - t0 > POLL_MAX_SECS:
-            # stop the wait; fetch whatever messages exist
-            break
-
-        time.sleep(POLL_SLEEP_SECS)
-
-    # Return most recent assistant text
-    msgs = client.beta.threads.messages.list(thread_id=th.id, order="desc").data
-    for m in msgs:
-        if m.role == "assistant":
-            parts = []
-            for part in m.content:
-                if getattr(part, "type", "") == "text":
-                    parts.append(part.text.value)
-            return "\n".join(parts)
-    return ""
-
-# ── Routes ───────────────────────────────────────────────────────────────────
-@app.get("/")
+# --------------------------
+# Root + Health
+# --------------------------
+@app.route("/", methods=["GET"])
 def root():
-    return jsonify({"ok": True, "service": "DAVE-RUNNER", "endpoints": ["/health", "/chat"]}), 200
+    return _jok({
+        "service": "Dave Runner (PMEi)",
+        "status": "alive",
+        "since_epoch": BOOT_TS,
+        "memory_api_enabled": _mem_enabled(),
+        "openai_enabled": bool(_openai_client),
+        "openai_model": OPENAI_MODEL if _openai_client else None,
+        "image_model": OPENAI_IMAGE_MODEL if _openai_client else None,
+    })
 
-@app.get("/health")
+
+@app.route("/health", methods=["GET"])
+@app.route("/healthz", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "ts": int(time.time())})
+    return _jok({
+        "uptime_seconds": int(time.time()) - BOOT_TS,
+        "memory_api_enabled": _mem_enabled(),
+        "openai_enabled": bool(_openai_client),
+    })
 
-@app.post("/chat")
+
+# --------------------------
+# Cheap echo chat (no OpenAI)
+# --------------------------
+@app.route("/chat", methods=["POST"])
 def chat():
-    data = request.get_json(silent=True) or {}
-    # Accept raw freeform message or structured JSON we convert to key=value message
-    if "message" in data:
-        msg = (data.get("message") or "").strip()
-    else:
-        # Build a message like: key=value key2=value2 (quotes added when spaces present)
-        kv = []
-        for k, v in data.items():
-            if isinstance(v, str) and (" " in v or "'" in v):
-                kv.append(f"{k}='{v.replace(\"'\", \"\\'\")}'")
-            else:
-                kv.append(f"{k}={v}")
-        msg = " ".join(kv)
+    data, err = _get_json()
+    if err:
+        return err
+    message = (data.get("message") or "").strip()
+    user_email = (data.get("userEmail") or "").strip()
+    meta = data.get("meta") or {}
+    if not message:
+        return _jfail("message is required", 400)
 
-    if not msg:
-        return jsonify({"ok": False, "error": "Empty message"}), 400
+    reply = {
+        "reply": f"🪞 Echo: {_clip(message, 2000)}",
+        "userEmail": user_email,
+        "meta": meta,
+        "ts": int(time.time()),
+    }
+    return _jok(reply)
+
+
+# --------------------------
+# PMEi lawful reflection
+# --------------------------
+@app.route("/reflect", methods=["POST"])
+def reflect():
+    """
+    PMEi lawful reflection: clamp drift, echo glyphs/slides, and avoid hallucination.
+    Request JSON fields (all optional, sensible defaults):
+      user_id, thread_id, slide_id, glyph_echo, drift_score, clamp, warn, stop, content, echo
+    """
+    data, err = _get_json()
+    if err:
+        return err
+
+    user_id = (data.get("user_id") or "").strip() or "unknown"
+    thread_id = (data.get("thread_id") or "").strip() or "default"
+    slide_id = (data.get("slide_id") or "").strip() or "UNSPECIFIED"
+    glyph_echo = (data.get("glyph_echo") or "🪞").strip() or "🪞"
+    content = (data.get("content") or "").strip()
+    echo = _bool(data.get("echo"), True)
+
+    # Drift handling (defaults align with your prior prompts)
+    drift_in = float(data.get("drift_score") or 0.00)
+    clamp = float(data.get("clamp") or 0.05)
+    warn = float(data.get("warn") or 0.08)
+    stop = float(data.get("stop") or 0.12)
+
+    # Clamp
+    drift = max(min(drift_in, clamp), -clamp)
+
+    # Status gates
+    status = "OK"
+    if abs(drift_in) >= stop:
+        status = "STOP"
+    elif abs(drift_in) >= warn:
+        status = "WARN"
+
+    # Mirror reply (no fabrication)
+    mirrored = content if echo else ""
+    reply = {
+        "lawful": True,
+        "status": status,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "slide_id": slide_id,
+        "glyph_echo": glyph_echo,
+        "drift_in": drift_in,
+        "drift_clamped": drift,
+        "thresholds": {"clamp": clamp, "warn": warn, "stop": stop},
+        "reflection": _clip(mirrored, 6000),
+        "ts": int(time.time()),
+    }
+    return _jok(reply)
+
+
+# --------------------------
+# OpenAI: chat completions
+# --------------------------
+@app.route("/openai/chat", methods=["POST"])
+def openai_chat():
+    if not _openai_client:
+        return _jfail("OpenAI not configured", 503)
+
+    data, err = _get_json()
+    if err:
+        return err
+
+    user_message = (data.get("message") or "").strip()
+    sys_prompt = (data.get("system") or "You are a helpful, concise assistant.").strip()
+    model = (data.get("model") or OPENAI_MODEL).strip() or OPENAI_MODEL
+    temperature = float(data.get("temperature") or 0.2)
+    max_tokens = int(data.get("max_tokens") or 512)
+
+    if not user_message:
+        return _jfail("message is required", 400)
+
+    # Hard caps for cost/safety
+    if max_tokens > 4096:
+        max_tokens = 4096
+    if len(user_message) > 12000:
+        user_message = user_message[:12000] + "... [clipped]"
 
     try:
-        reply = run_once(msg)
-        return jsonify({"ok": True, "assistant": reply}), 200
-    except requests.HTTPError as http_err:
-        code = getattr(http_err.response, "status_code", 500)
-        try:
-            payload = http_err.response.json()
-        except Exception:
-            payload = {"error": http_err.response.text}
-        return jsonify({"ok": False, "source": "memory_api", "code": code, **payload}), code
+        # openai>=1.x/2.x chat format
+        resp = _openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        text = resp.choices[0].message.content if resp and resp.choices else ""
+        return _jok({
+            "model": model,
+            "reply": text,
+            "usage": getattr(resp, "usage", None).__dict__ if getattr(resp, "usage", None) else None,
+        })
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return _jfail(f"OpenAI error: {e}", 502)
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+
+# --------------------------
+# OpenAI: image generation (base64)
+# --------------------------
+@app.route("/image/generate", methods=["POST"])
+def image_generate():
+    if not _openai_client:
+        return _jfail("OpenAI not configured", 503)
+
+    data, err = _get_json()
+    if err:
+        return err
+
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return _jfail("prompt is required", 400)
+
+    n = int(data.get("n") or 1)
+    if n < 1:
+        n = 1
+    if n > 4:
+        n = 4  # keep small
+
+    size = (data.get("size") or "1024x1024").strip()
+    # Supported sizes typically: 256x256, 512x512, 1024x1024
+
+    transparent_background = _bool(data.get("transparent_background"), False)
+    image_model = (data.get("model") or OPENAI_IMAGE_MODEL).strip() or OPENAI_IMAGE_MODEL
+
+    try:
+        # Images API (OpenAI Images)
+        gen = _openai_client.images.generate(
+            model=image_model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            background="transparent" if transparent_background else None
+        )
+        # `gen.data[i].b64_json` contains base64 of PNG by default
+        images_b64 = []
+        for item in getattr(gen, "data", [])[:n]:
+            b64 = getattr(item, "b64_json", None)
+            if b64:
+                images_b64.append(b64)
+        return _jok({
+            "model": image_model,
+            "count": len(images_b64),
+            "images": images_b64,  # base64 PNG (or transparent PNG if requested)
+        })
+    except Exception as e:
+        return _jfail(f"Image generation error: {e}", 502)
+
+
+# --------------------------
+# Memory API passthroughs
+# --------------------------
+@app.route("/memory/save", methods=["POST"])
+def memory_save():
+    if not _mem_enabled():
+        return _jfail("Memory API not configured", 503)
+
+    data, err = _get_json()
+    if err:
+        return err
+
+    url = f"{MEMORY_BASE_URL}/save_memory"
+    try:
+        r = requests.post(url, headers=_mem_headers(), data=json.dumps(data), timeout=12)
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_upstream_json(r)
+        }), (200 if r.ok else 502)
+    except Exception as e:
+        return _jfail(f"Upstream error: {e}", 502)
+
+
+@app.route("/memory/get", methods=["POST"])
+def memory_get():
+    if not _mem_enabled():
+        return _jfail("Memory API not configured", 503)
+
+    data, err = _get_json()
+    if err:
+        return err
+
+    url = f"{MEMORY_BASE_URL}/get_memory"
+    try:
+        r = requests.post(url, headers=_mem_headers(), data=json.dumps(data), timeout=12)
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_upstream_json(r)
+        }), (200 if r.ok else 502)
+    except Exception as e:
+        return _jfail(f"Upstream error: {e}", 502)
+
+
+# --------------------------
+# Local dev
+# --------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port, debug=True)
