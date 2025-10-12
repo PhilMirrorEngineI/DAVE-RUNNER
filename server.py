@@ -1,226 +1,204 @@
-# server.py — DavePMEi Memory API (synced with Function Runner)
-import os, re, time, uuid, sqlite3, json
-from flask import Flask, request, jsonify, g, Response
-from functools import wraps
-from pathlib import Path
+# runner.py — Dave Runner (Assistants tool-loop → PMEi Memory API)
+# Aligns to X-API-KEY only
 
-# ── Config ────────────────────────────────────────────────────────────────────
-MEMORY_API_KEY  = os.environ.get("MEMORY_API_KEY", "").strip()
-ALLOWED_ORIGIN  = os.environ.get("ALLOWED_ORIGIN", "*")  # comma-separate for multiple origins
-DEFAULT_DB_PATH = os.environ.get("DB_PATH", "/var/data/dave.sqlite3")  # persistent disk on Render
-OPENAPI_PATH    = os.environ.get("OPENAPI_PATH", "./openapi.json")
+import os
+import time
+import json
+import shlex
+import requests
+from typing import Dict, Any, Tuple, List
+from flask import Flask, request, jsonify
+from openai import OpenAI
 
+# ── Env ──────────────────────────────────────────────────────────────────────
+OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
+ASSISTANT_ID    = os.environ["ASSISTANT_ID"]  # Playground / GPT Editor Assistant ID
+MEMORY_BASE_URL = (os.environ.get("MEMORY_BASE_URL", "") or "").rstrip("/")
+MEMORY_API_KEY  = os.environ.get("MEMORY_API_KEY", "")
+
+SAVE_REPLIES    = os.environ.get("SAVE_REPLIES", "true").lower() == "true"
+POLL_SLEEP_SECS = float(os.environ.get("POLL_SLEEP_SECS", "0.6"))
+POLL_MAX_SECS   = int(os.environ.get("POLL_MAX_SECS", "60"))
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
-# ── Small util ────────────────────────────────────────────────────────────────
-def _ensure_parent_dir(path: str):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+# ── Utils ────────────────────────────────────────────────────────────────────
+def parse_message_kv(message: str) -> dict:
+    """Parse key=value pairs; respects quotes via shlex."""
+    args = {}
+    for tok in shlex.split(message or ""):
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            args[k.strip()] = v.strip()
+    return args
 
-def _auth_header_matches() -> bool:
-    """Accept X-API-Key, X-API-KEY, or Authorization: Bearer <key>."""
-    key1 = request.headers.get("X-API-Key", "")
-    key2 = request.headers.get("X-API-KEY", "")
-    auth = request.headers.get("Authorization", "")
-    bear = auth.split(" ", 1)[1].strip() if auth.startswith("Bearer ") and len(auth.split(" ", 1)) == 2 else ""
-    return any(k == MEMORY_API_KEY for k in (key1, key2, bear))
+def mem_call(path: str, method: str = "GET", params: dict | None = None, body: dict | None = None):
+    """HTTP to Memory API using X-API-KEY header (canonical)."""
+    if not MEMORY_BASE_URL:
+        raise RuntimeError("MEMORY_BASE_URL not configured")
+    if not MEMORY_API_KEY:
+        raise RuntimeError("MEMORY_API_KEY not configured")
 
-# ── Auth decorator (DEFINE BEFORE ANY ROUTES THAT USE IT) ─────────────────────
-def require_key(fn):
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        # allow public routes & preflight
-        if request.method == "OPTIONS" or request.path in ("/", "/health", "/healthz", "/openapi.json"):
-            return fn(*args, **kwargs)
-        if not MEMORY_API_KEY:
-            return jsonify({"ok": False, "error": "Server misconfigured: missing MEMORY_API_KEY"}), 500
-        if not _auth_header_matches():
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
-        return fn(*args, **kwargs)
-    return wrapped
+    url = f"{MEMORY_BASE_URL}{path}"
+    headers = {"X-API-KEY": MEMORY_API_KEY, "Content-Type": "application/json"}
+    if method.upper() == "GET":
+        r = requests.get(url, headers=headers, params=params or {}, timeout=20)
+    else:
+        r = requests.post(url, headers=headers, json=body or {}, timeout=20)
+    r.raise_for_status()
+    return r.json() if r.content else {}
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
-def get_db():
-    if "db" not in g:
-        _ensure_parent_dir(DEFAULT_DB_PATH)
-        g.db = sqlite3.connect(DEFAULT_DB_PATH, check_same_thread=False)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+# ── Tool bridge (maps Assistant tool calls → Memory API) ─────────────────────
+def handle_tool_call(tc) -> Tuple[str, str]:
+    """
+    Supports either:
+      - Unified function: function_runner(message="operation=... user_id=...")
+      - Direct tool names: get_memory / recall_memory_window / memory_bridge / save_memory / reflect_and_store_memory
+    Returns: (tool_call_id, output_json_string)
+    """
+    name = getattr(tc.function, "name", "") or ""
+    raw_args = json.loads(getattr(tc.function, "arguments", "") or "{}")
 
-def init_db():
-    db = get_db()
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     TEXT    NOT NULL,
-            thread_id   TEXT    NOT NULL,
-            slide_id    TEXT    NOT NULL,
-            glyph_echo  TEXT    NOT NULL,
-            drift_score REAL    NOT NULL,
-            seal        TEXT    NOT NULL,
-            role        TEXT    NOT NULL,      -- NEW: store role for Runner sync
-            content     TEXT    NOT NULL,
-            ts          INTEGER NOT NULL
-        );
-    """)
-    db.execute("CREATE INDEX IF NOT EXISTS idx_mem_ts     ON memories(ts DESC);")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_mem_user   ON memories(user_id);")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_mem_thread ON memories(thread_id);")
-    db.commit()
+    # If unified, peel 'message' and parse KV
+    if name == "function_runner":
+        args = parse_message_kv(raw_args.get("message", ""))
+    else:
+        args = dict(raw_args)
 
-@app.teardown_appcontext
-def close_db(exc):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+    # Defaults that won't override explicit args
+    defaults = {
+        "slide_id": "t-001",
+        "glyph_echo": "🪞",
+        "drift_score": 0.05,
+        "seal": "lawful",
+        "limit": 5,
+        "content": "(no content provided)",
+    }
+    for k, v in defaults.items():
+        args.setdefault(k, v)
 
-# ── Errors / CORS ─────────────────────────────────────────────────────────────
-@app.errorhandler(Exception)
-def handle_error(e):
-    code = getattr(e, "code", 500)
-    return jsonify({"ok": False, "error": str(e), "code": code}), code
+    operation = (args.get("operation") or name or "").strip().lower()
 
-@app.after_request
-def add_cors(resp):
-    # Multi-origin support: comma-separated list, wildcard allowed
-    origins = [o.strip() for o in (ALLOWED_ORIGIN or "*").split(",")]
-    req_origin = request.headers.get("Origin", "")
-    allow = None
-    if len(origins) > 1 and req_origin:
-        for pattern in origins:
-            regex = "^" + re.escape(pattern).replace("\\*", ".*") + "$"
-            if re.match(regex, req_origin):
-                allow = req_origin
-                break
-    resp.headers["Access-Control-Allow-Origin"] = allow or ALLOWED_ORIGIN
-    resp.headers["Vary"] = "Origin"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-API-KEY, Authorization"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Content-Type"] = "application/json; charset=utf-8"
-    # no-store on reads so clients always see latest
-    if request.path in ("/get_memory", "/latest_memory"):
-        resp.headers["Cache-Control"] = "no-store"
-        resp.headers["Pragma"] = "no-cache"
-    return resp
+    # READ
+    if operation in ("memory_bridge", "get_memory", "recall_memory_window"):
+        params = {k: args.get(k) for k in ("user_id", "thread_id", "limit") if args.get(k)}
+        out = mem_call("/get_memory", "GET", params=params)
+        return tc.id, json.dumps(out)
+
+    # WRITE
+    if operation in ("save_memory", "reflect_and_store_memory"):
+        body = {
+            "user_id":     args.get("user_id", ""),
+            "thread_id":   args.get("thread_id", "") or "assistant-run",
+            "slide_id":    args.get("slide_id"),
+            "glyph_echo":  args.get("glyph_echo"),
+            "drift_score": float(args.get("drift_score") or 0.0),
+            "seal":        args.get("seal"),
+            "content":     args.get("content"),
+        }
+        out = mem_call("/save_memory", "POST", body=body)
+        return tc.id, json.dumps(out)
+
+    return tc.id, json.dumps({"ok": False, "error": f"unknown operation '{operation}'", "received": {"name": name, "args": args}})
+
+# ── Run one Assistants session with tool loop ────────────────────────────────
+def run_once(user_msg: str) -> str:
+    """Create thread, post user message, start run, process tools, return last assistant text."""
+    # Thread + msg
+    th = client.beta.threads.create()
+    client.beta.threads.messages.create(th.id, role="user", content=user_msg)
+
+    # Start run
+    run = client.beta.threads.runs.create(
+        thread_id=th.id,
+        assistant_id=ASSISTANT_ID,
+        tool_choice="auto",
+    )
+
+    t0 = time.time()
+    while True:
+        run = client.beta.threads.runs.retrieve(thread_id=th.id, run_id=run.id)
+        status = run.status
+
+        if status == "requires_action":
+            calls = run.required_action.submit_tool_outputs.tool_calls
+            outs = []
+            for tc in calls:
+                try:
+                    tid, output = handle_tool_call(tc)
+                except Exception as e:
+                    tid = tc.id
+                    output = json.dumps({"ok": False, "error": f"runner exception: {e}"})
+                outs.append({"tool_call_id": tid, "output": output})
+            run = client.beta.threads.runs.submit_tool_outputs(
+                thread_id=th.id,
+                run_id=run.id,
+                tool_outputs=outs
+            )
+
+        elif status in ("completed", "failed", "cancelled", "expired"):
+            break
+
+        if time.time() - t0 > POLL_MAX_SECS:
+            # stop the wait; fetch whatever messages exist
+            break
+
+        time.sleep(POLL_SLEEP_SECS)
+
+    # Return most recent assistant text
+    msgs = client.beta.threads.messages.list(thread_id=th.id, order="desc").data
+    for m in msgs:
+        if m.role == "assistant":
+            parts = []
+            for part in m.content:
+                if getattr(part, "type", "") == "text":
+                    parts.append(part.text.value)
+            return "\n".join(parts)
+    return ""
 
 # ── Routes ───────────────────────────────────────────────────────────────────
-@app.route("/")
+@app.get("/")
 def root():
-    return jsonify({
-        "ok": True,
-        "service": "DavePMEi Memory API",
-        "endpoints": ["/health","/healthz","/openapi.json","/save_memory","/get_memory","/latest_memory"]
-    })
+    return jsonify({"ok": True, "service": "DAVE-RUNNER", "endpoints": ["/health", "/chat"]}), 200
 
-@app.route("/health")
-@app.route("/healthz")
+@app.get("/health")
 def health():
     return jsonify({"ok": True, "ts": int(time.time())})
 
-@app.route("/openapi.json")
-def openapi_file():
-    try:
-        with open(OPENAPI_PATH, "r", encoding="utf-8") as f:
-            payload = f.read()
-        return Response(payload, mimetype="application/json")
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"openapi.json not found or unreadable: {e}"}), 500
-
-@app.route("/save_memory", methods=["POST", "OPTIONS"])
-@require_key
-def save_memory():
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-
+@app.post("/chat")
+def chat():
     data = request.get_json(silent=True) or {}
+    # Accept raw freeform message or structured JSON we convert to key=value message
+    if "message" in data:
+        msg = (data.get("message") or "").strip()
+    else:
+        # Build a message like: key=value key2=value2 (quotes added when spaces present)
+        kv = []
+        for k, v in data.items():
+            if isinstance(v, str) and (" " in v or "'" in v):
+                kv.append(f"{k}='{v.replace(\"'\", \"\\'\")}'")
+            else:
+                kv.append(f"{k}={v}")
+        msg = " ".join(kv)
 
-    # Accept both FULL and MINIMAL payloads (Runner sends minimal at times)
-    # FULL required set for legacy/strict:
-    full_required = ["user_id","thread_id","slide_id","glyph_echo","drift_score","seal","content"]
-    # If not full, map defaults so insert always succeeds
-    user_id     = str(data.get("user_id", "")).strip()
-    content     = str(data.get("content", "")).strip()
-    role        = str(data.get("role", "assistant")).strip() or "assistant"
+    if not msg:
+        return jsonify({"ok": False, "error": "Empty message"}), 400
 
-    if not user_id or not content:
-        return jsonify({"ok": False, "error": "Missing user_id or content"}), 400
-
-    thread_id   = str(data.get("thread_id", "general")).strip() or "general"
-    slide_id    = str(data.get("slide_id", str(uuid.uuid4()))).strip()
-    glyph_echo  = str(data.get("glyph_echo", "🪞")).strip() or "🪞"
-    drift_score = float(data.get("drift_score", 0.05))
-    seal        = str(data.get("seal", "lawful")).strip() or "lawful"
-
-    ts = int(time.time())
-    db = get_db()
-    db.execute(
-        """INSERT INTO memories (user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts)
-    )
-    db.commit()
-    return jsonify({
-        "ok": True,
-        "status": "ok",
-        "slide_id": slide_id,
-        "ts": ts,
-        "request_id": str(uuid.uuid4())
-    }), 200
-
-@app.route("/get_memory", methods=["GET", "OPTIONS"])
-@require_key
-def get_memory():
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-
-    limit_raw = request.args.get("limit", "10")
     try:
-        limit = max(1, min(int(limit_raw), 200))
-    except ValueError:
-        return jsonify({"ok": False, "error": "limit must be an integer"}), 400
+        reply = run_once(msg)
+        return jsonify({"ok": True, "assistant": reply}), 200
+    except requests.HTTPError as http_err:
+        code = getattr(http_err.response, "status_code", 500)
+        try:
+            payload = http_err.response.json()
+        except Exception:
+            payload = {"error": http_err.response.text}
+        return jsonify({"ok": False, "source": "memory_api", "code": code, **payload}), code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-    user_id   = request.args.get("user_id")
-    thread_id = request.args.get("thread_id")
-    slide_id  = request.args.get("slide_id")
-    seal      = request.args.get("seal")
-    role      = request.args.get("role")
-
-    clauses, params = [], []
-    if user_id:   clauses.append("user_id = ?");   params.append(user_id)
-    if thread_id: clauses.append("thread_id = ?"); params.append(thread_id)
-    if slide_id:  clauses.append("slide_id = ?");  params.append(slide_id)
-    if seal:      clauses.append("seal = ?");      params.append(seal)
-    if role:      clauses.append("role = ?");      params.append(role)
-
-    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f"""
-        SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts
-        FROM memories
-        {where_sql}
-        ORDER BY ts DESC
-        LIMIT ?;
-    """
-    params.append(limit)
-
-    rows = get_db().execute(sql, params).fetchall()
-    items = [dict(r) for r in rows]
-    return jsonify({"ok": True, "items": items, "count": len(items)}), 200
-
-@app.route("/latest_memory", methods=["GET"])
-@require_key
-def latest_memory():
-    row = get_db().execute(
-        "SELECT user_id, thread_id, slide_id, glyph_echo, drift_score, seal, role, content, ts "
-        "FROM memories ORDER BY ts DESC LIMIT 1;"
-    ).fetchone()
-    if not row:
-        return jsonify({}), 200
-    return jsonify(dict(row)), 200
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-@app.before_request
-def _ensure_ready():
-    init_db()  # idempotent
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
+    port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
