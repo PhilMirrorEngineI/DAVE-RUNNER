@@ -3,12 +3,14 @@
 #   gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 #
 # Env (core):
-#   MEMORY_BASE_URL  = https://function-runner.onrender.com
-#   MEMORY_API_KEY   = <secret>
-#   ENABLE_KEEPALIVE = true
-#   SELF_HEALTH_URL  = https://dave-runner.onrender.com/health
-#   KEEPALIVE_INTERVAL = 60
-#   OPENAI_API_KEY   = <optional key>
+#   MEMORY_BASE_URL       = https://function-runner.onrender.com
+#   MEMORY_API_KEY        = <secret>
+#   ENABLE_KEEPALIVE      = true
+#   SELF_HEALTH_URL       = https://dave-runner.onrender.com/health
+#   KEEPALIVE_INTERVAL    = 60
+#   OPENAI_API_KEY        = <optional key>
+#   OPENAI_MODEL          = gpt-4o-mini
+#   OPENAI_IMAGE_MODEL    = gpt-image-1
 
 import os, io, json, time, base64, threading, requests
 from typing import Any, Dict, Optional, Tuple
