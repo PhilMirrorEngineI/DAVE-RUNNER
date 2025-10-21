@@ -1,27 +1,20 @@
-# server.py — Dave Runner (PMEi) — lawful build with Keepalive + Triple Warmup
+# server.py — Dave Runner (PMEi) — lawful build with 60s Keepalive + Triple Warmup
 # Start with:
 #   gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 #
-# Endpoints:
-#   GET  /, /health, /healthz
-#   POST /chat, /reflect, /openai/chat, /image/generate
-#   POST /memory/save, /memory/get
-#
-# Env (main vars):
+# Env (core):
 #   MEMORY_BASE_URL  = https://function-runner.onrender.com
 #   MEMORY_API_KEY   = <secret>
 #   ENABLE_KEEPALIVE = true
 #   SELF_HEALTH_URL  = https://dave-runner.onrender.com/health
-#   KEEPALIVE_INTERVAL = 240
-#   OPENAI_API_KEY   = <key> (optional)
-#   OPENAI_MODEL     = gpt-4o-mini
-#   OPENAI_IMAGE_MODEL = gpt-image-1
+#   KEEPALIVE_INTERVAL = 60
+#   OPENAI_API_KEY   = <optional key>
 
 import os, io, json, time, base64, threading, requests
 from typing import Any, Dict, Optional, Tuple
 from flask import Flask, request, jsonify
 
-# ---------- OpenAI client (optional) ----------
+# ---------- OpenAI (optional) ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
@@ -48,9 +41,9 @@ def _jfail(msg: str, http: int = 400, **extra):
     return jsonify(p), http
 
 def _jok(data: Any = None, **extra):
-    p = {"ok": True}; 
+    p = {"ok": True}
     if data is not None: p["data"] = data
-    p.update(extra); 
+    p.update(extra)
     return jsonify(p)
 
 def _get_json() -> Tuple[Optional[dict], Optional[Tuple[Any, int]]]:
@@ -62,7 +55,7 @@ def _get_json() -> Tuple[Optional[dict], Optional[Tuple[Any, int]]]:
 
 def _mem_enabled() -> bool: return bool(MEMORY_BASE_URL and MEMORY_API_KEY)
 def _mem_headers() -> Dict[str,str]: return {"Content-Type":"application/json","X-API-KEY":MEMORY_API_KEY}
-def _safe_json(r: requests.Response): 
+def _safe_json(r: requests.Response):
     try: return r.json()
     except Exception: return {"raw": r.text[:1000], "status": r.status_code}
 def _clip(s:str,l:int)->str: return s if len(s)<=l else s[:l]+f"...[{len(s)-l} more]"
@@ -76,7 +69,7 @@ def _bool(v:Any,d=False)->bool:
 
 # ---------- Health ----------
 @app.route("/", methods=["GET"])
-def root(): 
+def root():
     return _jok({
         "service":"Dave Runner (PMEi)",
         "status":"alive",
@@ -159,19 +152,21 @@ def memory_get():
     except Exception as e:
         return _jfail(f"Upstream error: {e}",502)
 
-# ---------- Keepalive ----------
+# ---------- Keepalive (60s triple ping) ----------
 def _keepalive():
     url=os.getenv("SELF_HEALTH_URL")
-    interval=int(os.getenv("KEEPALIVE_INTERVAL","240"))
+    interval=int(os.getenv("KEEPALIVE_INTERVAL","60"))
     if not url:
         print("[KEEPALIVE] Disabled (no SELF_HEALTH_URL)");return
-    print(f"[KEEPALIVE] Active: pinging {url} every {interval}s")
+    print(f"[KEEPALIVE] Active: triple ping to {url} every {interval}s")
     while True:
-        try:
-            requests.get(url,timeout=10)
-            print(f"[KEEPALIVE] Ping -> 200 @ {int(time.time())}")
-        except Exception as e:
-            print(f"[KEEPALIVE] Error: {e}")
+        for i in range(3):
+            try:
+                r=requests.get(url,timeout=10)
+                print(f"[KEEPALIVE] Ping {i+1}/3 -> {r.status_code} @ {int(time.time())}")
+            except Exception as e:
+                print(f"[KEEPALIVE] Error {i+1}/3: {e}")
+            time.sleep(2)
         time.sleep(interval)
 
 # ---------- Triple Warmup ----------
