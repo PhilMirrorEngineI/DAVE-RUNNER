@@ -1,4 +1,4 @@
-# server.py — Dave Runner (PMEi) — full modular rebuild
+# server.py — Dave Runner (PMEi) — full modular rebuild + lawful keepalive
 # Start with:
 #   gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 #
@@ -14,26 +14,28 @@
 #
 # Env (all optional except OPENAI_API_KEY for /openai and /image):
 #   OPENAI_API_KEY   = <key>
-#   OPENAI_MODEL     = gpt-4o-mini (default)  # chat endpoint default
+#   OPENAI_MODEL     = gpt-4o-mini (default)
 #   OPENAI_IMAGE_MODEL = gpt-image-1 (default)
-#   TAVILY_API_KEY   = <key>  # reserved (not used in this file)
-#   MEMORY_BASE_URL  = https://davepmei-ai.onrender.com   # no trailing slash
+#   TAVILY_API_KEY   = <key>  # reserved (not used)
+#   MEMORY_BASE_URL  = https://function-runner.onrender.com   # no trailing slash
 #   MEMORY_API_KEY   = <secret>  # sent as X-API-KEY
-#   DATABASE_URL     = <postgres url>  # reserved (not used in this file)
+#   ENABLE_KEEPALIVE = true
+#   SELF_HEALTH_URL  = https://<your-dave-runner>.onrender.com/health
+#   KEEPALIVE_INTERVAL = 240  # seconds (default)
 #
 # Notes:
-# - Safe JSON parsing, robust error handling, and tight timeouts.
-# - No trailing slash bug on MEMORY_BASE_URL (we rstrip("/")).
+# - Safe JSON parsing, robust error handling, tight timeouts.
+# - Keepalive prevents Render idle sleep (self-pings every N seconds).
 # - Image responses are base64 strings; no file writes.
-# - Keep payload sizes sane to avoid timeouts + costs.
+# - No trailing slash bug on MEMORY_BASE_URL (we rstrip("/")).
 
 import os
 import io
 import json
 import time
 import base64
+import threading
 from typing import Any, Dict, Optional, Tuple
-
 import requests
 from flask import Flask, request, jsonify
 
@@ -44,9 +46,9 @@ OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip() or "
 
 if OPENAI_API_KEY:
     try:
-        from openai import OpenAI  # openai>=1.x/2.x
+        from openai import OpenAI
         _openai_client: Optional["OpenAI"] = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as _e:  # Import errors shouldn’t crash the service
+    except Exception:
         _openai_client = None
 else:
     _openai_client = None
@@ -55,7 +57,7 @@ else:
 MEMORY_BASE_URL = (os.getenv("MEMORY_BASE_URL") or "").rstrip("/")
 MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "").strip()
 
-# Reserved (not used in this file but kept for parity with the 400-liner)
+# Reserved (parity)
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -98,10 +100,7 @@ def _mem_enabled() -> bool:
 
 
 def _mem_headers() -> Dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "X-API-KEY": MEMORY_API_KEY,  # Header expected by your Memory API
-    }
+    return {"Content-Type": "application/json", "X-API-KEY": MEMORY_API_KEY}
 
 
 def _safe_upstream_json(resp: requests.Response) -> Any:
@@ -158,7 +157,7 @@ def health():
 
 
 # --------------------------
-# Cheap echo chat (no OpenAI)
+# Cheap echo chat
 # --------------------------
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -185,39 +184,29 @@ def chat():
 # --------------------------
 @app.route("/reflect", methods=["POST"])
 def reflect():
-    """
-    PMEi lawful reflection: clamp drift, echo glyphs/slides, and avoid hallucination.
-    Request JSON fields (all optional, sensible defaults):
-      user_id, thread_id, slide_id, glyph_echo, drift_score, clamp, warn, stop, content, echo
-    """
     data, err = _get_json()
     if err:
         return err
 
-    user_id = (data.get("user_id") or "").strip() or "unknown"
-    thread_id = (data.get("thread_id") or "").strip() or "default"
-    slide_id = (data.get("slide_id") or "").strip() or "UNSPECIFIED"
-    glyph_echo = (data.get("glyph_echo") or "🪞").strip() or "🪞"
+    user_id = (data.get("user_id") or "unknown").strip()
+    thread_id = (data.get("thread_id") or "default").strip()
+    slide_id = (data.get("slide_id") or "UNSPECIFIED").strip()
+    glyph_echo = (data.get("glyph_echo") or "🪞").strip()
     content = (data.get("content") or "").strip()
     echo = _bool(data.get("echo"), True)
 
-    # Drift handling (defaults align with your prior prompts)
     drift_in = float(data.get("drift_score") or 0.00)
     clamp = float(data.get("clamp") or 0.05)
     warn = float(data.get("warn") or 0.08)
     stop = float(data.get("stop") or 0.12)
 
-    # Clamp
     drift = max(min(drift_in, clamp), -clamp)
-
-    # Status gates
     status = "OK"
     if abs(drift_in) >= stop:
         status = "STOP"
     elif abs(drift_in) >= warn:
         status = "WARN"
 
-    # Mirror reply (no fabrication)
     mirrored = content if echo else ""
     reply = {
         "lawful": True,
@@ -236,7 +225,7 @@ def reflect():
 
 
 # --------------------------
-# OpenAI: chat completions
+# OpenAI chat
 # --------------------------
 @app.route("/openai/chat", methods=["POST"])
 def openai_chat():
@@ -251,19 +240,14 @@ def openai_chat():
     sys_prompt = (data.get("system") or "You are a helpful, concise assistant.").strip()
     model = (data.get("model") or OPENAI_MODEL).strip() or OPENAI_MODEL
     temperature = float(data.get("temperature") or 0.2)
-    max_tokens = int(data.get("max_tokens") or 512)
-
+    max_tokens = min(int(data.get("max_tokens") or 512), 4096)
     if not user_message:
         return _jfail("message is required", 400)
 
-    # Hard caps for cost/safety
-    if max_tokens > 4096:
-        max_tokens = 4096
     if len(user_message) > 12000:
         user_message = user_message[:12000] + "... [clipped]"
 
     try:
-        # openai>=1.x/2.x chat format
         resp = _openai_client.chat.completions.create(
             model=model,
             messages=[
@@ -284,7 +268,7 @@ def openai_chat():
 
 
 # --------------------------
-# OpenAI: image generation (base64)
+# OpenAI image generation
 # --------------------------
 @app.route("/image/generate", methods=["POST"])
 def image_generate():
@@ -299,20 +283,12 @@ def image_generate():
     if not prompt:
         return _jfail("prompt is required", 400)
 
-    n = int(data.get("n") or 1)
-    if n < 1:
-        n = 1
-    if n > 4:
-        n = 4  # keep small
-
+    n = max(1, min(int(data.get("n") or 1), 4))
     size = (data.get("size") or "1024x1024").strip()
-    # Supported sizes typically: 256x256, 512x512, 1024x1024
-
     transparent_background = _bool(data.get("transparent_background"), False)
     image_model = (data.get("model") or OPENAI_IMAGE_MODEL).strip() or OPENAI_IMAGE_MODEL
 
     try:
-        # Images API (OpenAI Images)
         gen = _openai_client.images.generate(
             model=image_model,
             prompt=prompt,
@@ -320,17 +296,9 @@ def image_generate():
             size=size,
             background="transparent" if transparent_background else None
         )
-        # `gen.data[i].b64_json` contains base64 of PNG by default
-        images_b64 = []
-        for item in getattr(gen, "data", [])[:n]:
-            b64 = getattr(item, "b64_json", None)
-            if b64:
-                images_b64.append(b64)
-        return _jok({
-            "model": image_model,
-            "count": len(images_b64),
-            "images": images_b64,  # base64 PNG (or transparent PNG if requested)
-        })
+        images_b64 = [getattr(item, "b64_json", None)
+                      for item in getattr(gen, "data", [])[:n] if getattr(item, "b64_json", None)]
+        return _jok({"model": image_model, "count": len(images_b64), "images": images_b64})
     except Exception as e:
         return _jfail(f"Image generation error: {e}", 502)
 
@@ -342,19 +310,14 @@ def image_generate():
 def memory_save():
     if not _mem_enabled():
         return _jfail("Memory API not configured", 503)
-
     data, err = _get_json()
     if err:
         return err
-
-    url = f"{MEMORY_BASE_URL}/save_memory"
     try:
-        r = requests.post(url, headers=_mem_headers(), data=json.dumps(data), timeout=12)
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_upstream_json(r)
-        }), (200 if r.ok else 502)
+        r = requests.post(f"{MEMORY_BASE_URL}/save_memory", headers=_mem_headers(),
+                          data=json.dumps(data), timeout=12)
+        return jsonify({"ok": r.ok, "upstream_status": r.status_code,
+                        "data": _safe_upstream_json(r)}), (200 if r.ok else 502)
     except Exception as e:
         return _jfail(f"Upstream error: {e}", 502)
 
@@ -363,21 +326,39 @@ def memory_save():
 def memory_get():
     if not _mem_enabled():
         return _jfail("Memory API not configured", 503)
-
     data, err = _get_json()
     if err:
         return err
-
-    url = f"{MEMORY_BASE_URL}/get_memory"
     try:
-        r = requests.post(url, headers=_mem_headers(), data=json.dumps(data), timeout=12)
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_upstream_json(r)
-        }), (200 if r.ok else 502)
+        r = requests.post(f"{MEMORY_BASE_URL}/get_memory", headers=_mem_headers(),
+                          data=json.dumps(data), timeout=12)
+        return jsonify({"ok": r.ok, "upstream_status": r.status_code,
+                        "data": _safe_upstream_json(r)}), (200 if r.ok else 502)
     except Exception as e:
         return _jfail(f"Upstream error: {e}", 502)
+
+
+# --------------------------
+# Keepalive Daemon
+# --------------------------
+def _keepalive():
+    url = os.getenv("SELF_HEALTH_URL")
+    interval = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
+    if not url:
+        print("[KEEPALIVE] Disabled (no SELF_HEALTH_URL)")
+        return
+    print(f"[KEEPALIVE] Active: pinging {url} every {interval}s")
+    while True:
+        try:
+            requests.get(url, timeout=10)
+            print(f"[KEEPALIVE] Ping -> 200 @ {int(time.time())}")
+        except Exception as e:
+            print(f"[KEEPALIVE] Error: {e}")
+        time.sleep(interval)
+
+
+if _bool(os.getenv("ENABLE_KEEPALIVE", True)):
+    threading.Thread(target=_keepalive, daemon=True).start()
 
 
 # --------------------------
