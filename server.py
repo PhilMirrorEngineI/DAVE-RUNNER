@@ -304,20 +304,33 @@ def image_generate():
 
 
 # --------------------------
-# Memory API passthroughs
+# Memory API passthroughs (timeout raised)
 # --------------------------
 @app.route("/memory/save", methods=["POST"])
 def memory_save():
+    """Forward save requests from Dave-Runner → Function-Runner with extended timeout."""
     if not _mem_enabled():
         return _jfail("Memory API not configured", 503)
+
     data, err = _get_json()
     if err:
         return err
+
     try:
-        r = requests.post(f"{MEMORY_BASE_URL}/save_memory", headers=_mem_headers(),
-                          data=json.dumps(data), timeout=12)
-        return jsonify({"ok": r.ok, "upstream_status": r.status_code,
-                        "data": _safe_upstream_json(r)}), (200 if r.ok else 502)
+        print(f"[FORWARD] -> {MEMORY_BASE_URL}/save_memory ({len(json.dumps(data))} bytes)")
+        r = requests.post(
+            f"{MEMORY_BASE_URL}/save_memory",
+            headers=_mem_headers(),
+            data=json.dumps(data),
+            timeout=30  # extended timeout from 12 s to 30 s
+        )
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_upstream_json(r)
+        }), (200 if r.ok else 502)
+    except requests.exceptions.Timeout:
+        return _jfail("Upstream timeout: Function-Runner did not respond in 30 s", 504)
     except Exception as e:
         return _jfail(f"Upstream error: {e}", 502)
 
@@ -330,10 +343,19 @@ def memory_get():
     if err:
         return err
     try:
-        r = requests.post(f"{MEMORY_BASE_URL}/get_memory", headers=_mem_headers(),
-                          data=json.dumps(data), timeout=12)
-        return jsonify({"ok": r.ok, "upstream_status": r.status_code,
-                        "data": _safe_upstream_json(r)}), (200 if r.ok else 502)
+        r = requests.post(
+            f"{MEMORY_BASE_URL}/get_memory",
+            headers=_mem_headers(),
+            data=json.dumps(data),
+            timeout=30
+        )
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_upstream_json(r)
+        }), (200 if r.ok else 502)
+    except requests.exceptions.Timeout:
+        return _jfail("Upstream timeout: Function-Runner did not respond in 30 s", 504)
     except Exception as e:
         return _jfail(f"Upstream error: {e}", 502)
 
