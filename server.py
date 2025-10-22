@@ -1,8 +1,8 @@
 # ──────────────────────────────────────────────
-# server.py — Dave Runner (PMEi Public-Safe Build)
+# server.py — Dave Runner (PMEi Public Bridge)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
-import os, json, time, base64, threading, requests
+import os, json, time, threading, requests
 from flask import Flask, request, jsonify
 from typing import Any, Dict, Optional, Tuple
 
@@ -11,16 +11,14 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
-if OPENAI_API_KEY:
-    try:
-        from openai import OpenAI
-        _openai_client: Optional["OpenAI"] = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
-        _openai_client = None
-else:
+try:
+    from openai import OpenAI
+    _openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+except Exception:
     _openai_client = None
 
-MEMORY_BASE_URL = (os.getenv("MEMORY_BASE_URL") or "").rstrip("/")
+# Function Runner is the memory backend
+MEMORY_BASE_URL = (os.getenv("MEMORY_BASE_URL") or "https://function-runner.onrender.com").rstrip("/")
 MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "").strip()
 BOOT_TS = int(time.time())
 
@@ -28,23 +26,23 @@ app = Flask(__name__)
 
 # ────────────── Helpers ──────────────
 def _jfail(msg, code=400, **extra):
-    p = {"ok": False, "error": msg}
-    p.update(extra)
-    return jsonify(p), code
+    r = {"ok": False, "error": msg}
+    r.update(extra)
+    return jsonify(r), code
 
 def _jok(data=None, **extra):
-    p = {"ok": True}
+    r = {"ok": True}
     if data is not None:
-        p["data"] = data
-    p.update(extra)
-    return jsonify(p)
+        r["data"] = data
+    r.update(extra)
+    return jsonify(r)
 
-def _get_json() -> Tuple[Optional[dict], Optional[Tuple[Any,int]]]:
+def _get_json():
     try:
-        data = request.get_json(force=True) or {}
-        if not isinstance(data, dict):
+        d = request.get_json(force=True) or {}
+        if not isinstance(d, dict):
             return None, _jfail("JSON body must be an object", 400)
-        return data, None
+        return d, None
     except Exception:
         return None, _jfail("Invalid or missing JSON body", 400)
 
@@ -52,10 +50,13 @@ def _safe_json(r: requests.Response):
     try:
         return r.json()
     except Exception:
-        return {"raw": r.text[:800], "status": r.status_code}
+        return {"raw": r.text[:1000], "status": r.status_code}
 
 def _mem_headers():
-    return {"Content-Type": "application/json", "X-API-Key": MEMORY_API_KEY}
+    h = {"Content-Type": "application/json"}
+    if MEMORY_API_KEY:
+        h["X-API-KEY"] = MEMORY_API_KEY
+    return h
 
 def _bool(v, d=False):
     if isinstance(v, bool):
@@ -70,10 +71,10 @@ def _bool(v, d=False):
 @app.route("/")
 def root():
     return _jok({
-        "service": "Dave Runner (PMEi public)",
+        "service": "Dave Runner (PMEi Public)",
         "since": BOOT_TS,
         "openai_enabled": bool(_openai_client),
-        "memory_base": bool(MEMORY_BASE_URL)
+        "memory_bridge": bool(MEMORY_BASE_URL)
     })
 
 @app.route("/health")
@@ -82,51 +83,88 @@ def health():
     return _jok({
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(_openai_client),
-        "memory_base": bool(MEMORY_BASE_URL)
+        "memory_bridge": bool(MEMORY_BASE_URL)
     })
 
-# ────────────── Cheap Echo Chat ──────────────
+# ────────────── Echo + Reflection ──────────────
 @app.route("/chat", methods=["POST"])
 def chat():
-    data, err = _get_json()
+    d, err = _get_json()
     if err: return err
-    msg = (data.get("message") or "").strip()
+    msg = (d.get("message") or "").strip()
     if not msg: return _jfail("message required")
     return _jok({"reply": f"🪞 Echo: {msg[:1000]}", "ts": int(time.time())})
 
-# ────────────── Reflection ──────────────
 @app.route("/reflect", methods=["POST"])
 def reflect():
-    data, err = _get_json()
+    d, err = _get_json()
     if err: return err
-    content = (data.get("content") or "").strip()
-    drift = float(data.get("drift_score") or 0.0)
-    clamp = 0.05
-    drift_c = max(min(drift, clamp), -clamp)
-    status = "OK" if abs(drift)<0.08 else ("WARN" if abs(drift)<0.12 else "STOP")
+    drift = float(d.get("drift_score") or 0.0)
+    clamp = max(min(drift, 0.05), -0.05)
+    status = "OK" if abs(drift) < 0.08 else ("WARN" if abs(drift) < 0.12 else "STOP")
     return _jok({
         "lawful": True,
         "status": status,
         "drift_in": drift,
-        "drift_clamped": drift_c,
-        "reflection": content[:2000],
+        "drift_clamped": clamp,
+        "reflection": (d.get("content") or "")[:2000],
         "ts": int(time.time())
     })
 
-# ────────────── OpenAI Chat ──────────────
+# ────────────── Public Memory Bridge ──────────────
+@app.route("/memory/save", methods=["POST"])
+def memory_save():
+    d, err = _get_json()
+    if err: return err
+    try:
+        r = requests.post(
+            f"{MEMORY_BASE_URL}/memory/save",
+            headers=_mem_headers(),
+            data=json.dumps(d),
+            timeout=15
+        )
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_json(r)
+        }), (200 if r.ok else 502)
+    except Exception as e:
+        print(f"[Mirror] save error: {e}")
+        return _jfail(f"Upstream error: {e}", 502)
+
+@app.route("/memory/get", methods=["POST"])
+def memory_get():
+    d, err = _get_json()
+    if err: return err
+    try:
+        r = requests.post(
+            f"{MEMORY_BASE_URL}/memory/get",
+            headers=_mem_headers(),
+            data=json.dumps(d),
+            timeout=12
+        )
+        return jsonify({
+            "ok": r.ok,
+            "upstream_status": r.status_code,
+            "data": _safe_json(r)
+        }), (200 if r.ok else 502)
+    except Exception as e:
+        print(f"[Mirror] get error: {e}")
+        return _jfail(f"Upstream error: {e}", 502)
+
+# ────────────── OpenAI passthrough (optional) ──────────────
 @app.route("/openai/chat", methods=["POST"])
 def openai_chat():
     if not _openai_client:
         return _jfail("OpenAI not configured", 503)
-    data, err = _get_json()
+    d, err = _get_json()
     if err: return err
-
-    msg = (data.get("message") or "").strip()
+    msg = (d.get("message") or "").strip()
     if not msg: return _jfail("message required")
-    sys_prompt = (data.get("system") or "You are a concise, lawful assistant.").strip()
-    model = (data.get("model") or OPENAI_MODEL)
-    temperature = float(data.get("temperature") or 0.2)
-    max_tokens = min(int(data.get("max_tokens") or 512), 4096)
+    sys_prompt = (d.get("system") or "You are a concise, lawful assistant.").strip()
+    model = (d.get("model") or OPENAI_MODEL)
+    temperature = float(d.get("temperature") or 0.2)
+    max_tokens = min(int(d.get("max_tokens") or 512), 4096)
 
     try:
         resp = _openai_client.chat.completions.create(
@@ -139,131 +177,13 @@ def openai_chat():
             max_tokens=max_tokens
         )
         text = resp.choices[0].message.content if resp and resp.choices else ""
-        usage = getattr(resp, "usage", None)
-        return _jok({
-            "model": model,
-            "reply": text,
-            "usage": getattr(usage, "__dict__", None)
-        })
+        return _jok({"model": model, "reply": text})
     except Exception as e:
         return _jfail(f"OpenAI error: {e}", 502)
 
-# ────────────── Image Generation ──────────────
-@app.route("/image/generate", methods=["POST"])
-def image_generate():
-    if not _openai_client:
-        return _jfail("OpenAI not configured", 503)
-    data, err = _get_json()
-    if err: return err
-    prompt = (data.get("prompt") or "").strip()
-    if not prompt: return _jfail("prompt required")
-    n = max(1, min(int(data.get("n") or 1), 4))
-    size = (data.get("size") or "1024x1024").strip()
-    transparent = _bool(data.get("transparent_background"), False)
-    try:
-        gen = _openai_client.images.generate(
-            model=OPENAI_IMAGE_MODEL,
-            prompt=prompt,
-            n=n,
-            size=size,
-            background="transparent" if transparent else None
-        )
-        imgs = [getattr(i, "b64_json", None)
-                for i in getattr(gen, "data", []) if getattr(i, "b64_json", None)]
-        return _jok({"model": OPENAI_IMAGE_MODEL, "count": len(imgs), "images": imgs})
-    except Exception as e:
-        return _jfail(f"Image generation error: {e}", 502)
-
-# ────────────── Public Memory Mirrors ──────────────
-@app.route("/memory/save_public", methods=["POST"])
-@app.route("/memory/save", methods=["POST"])
-@app.route("/save_memory", methods=["POST"])
-def memory_save_public():
-    data, err = _get_json()
-    if err:
-        return err
-    user = (data.get("user_id") or "").lower()
-    if not user:
-        user = "public"
-
-    try:
-        # Primary upstream attempt
-        try:
-            r = requests.post(
-                f"{MEMORY_BASE_URL}/save_memory",
-                headers=_mem_headers(),
-                data=json.dumps(data),
-                timeout=12
-            )
-        except Exception as e1:
-            print(f"[Mirror] primary save failed: {e1}")
-            # Fallback to legacy endpoint
-            try:
-                r = requests.post(
-                    f"{MEMORY_BASE_URL}/memory/save",
-                    headers=_mem_headers(),
-                    data=json.dumps(data),
-                    timeout=12
-                )
-            except Exception as e2:
-                print(f"[Mirror] fallback save failed: {e2}")
-                return _jfail(f"Upstream save failed: {e2}", 502)
-
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_json(r)
-        }), (200 if r.ok else 502)
-
-    except Exception as e:
-        print(f"[Mirror] unexpected save error: {e}")
-        return _jfail(f"Upstream error: {e}", 502)
-
-@app.route("/memory/get_public", methods=["GET", "POST"])
-@app.route("/memory/get", methods=["GET", "POST"])
-@app.route("/get_memory", methods=["GET", "POST"])
-def memory_get_public():
-    if request.method == "POST":
-        args = request.get_json(force=True) or {}
-    else:
-        args = request.args
-
-    user = (args.get("user_id") or "").lower()
-    thread = (args.get("thread_id") or "general")
-    limit = int(args.get("limit") or 20)
-    if not user:
-        user = "public"
-
-    try:
-        try:
-            r = requests.get(
-                f"{MEMORY_BASE_URL}/get_memory",
-                headers=_mem_headers(),
-                params={"user_id": user, "thread_id": thread, "limit": limit},
-                timeout=12
-            )
-        except Exception as e1:
-            print(f"[Mirror] primary get failed: {e1}")
-            r = requests.get(
-                f"{MEMORY_BASE_URL}/memory/get",
-                headers=_mem_headers(),
-                params={"user_id": user, "thread_id": thread, "limit": limit},
-                timeout=12
-            )
-
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_json(r)
-        }), (200 if r.ok else 502)
-
-    except Exception as e:
-        print(f"[Mirror] unexpected get error: {e}")
-        return _jfail(f"Upstream error: {e}", 502)
-
 # ────────────── Keepalive ──────────────
 def _keepalive():
-    url = os.getenv("SELF_HEALTH_URL")
+    url = os.getenv("SELF_HEALTH_URL", "")
     interval = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
     if not url:
         print("[KEEPALIVE] disabled (no SELF_HEALTH_URL)")
@@ -282,5 +202,5 @@ if _bool(os.getenv("ENABLE_KEEPALIVE", True)):
 
 # ────────────── Local Dev ──────────────
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=True)
