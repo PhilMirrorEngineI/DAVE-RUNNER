@@ -196,12 +196,27 @@ def memory_save_public():
     try:
         # try both lawful and legacy
         try:
-            r = requests.post(
-                f"{MEMORY_BASE_URL}/save_memory",
-                headers=_mem_headers(),
-                data=json.dumps(data),
-                timeout=12
-            )
+            # try primary
+try:
+    r = requests.post(
+        f"{MEMORY_BASE_URL}/save_memory",
+        headers=_mem_headers(),
+        data=json.dumps(data),
+        timeout=12
+    )
+except Exception as e1:
+    print(f"[Mirror] primary failed: {e1}")
+    # try fallback
+    try:
+        r = requests.post(
+            f"{MEMORY_BASE_URL}/memory/save",
+            headers=_mem_headers(),
+            data=json.dumps(data),
+            timeout=12
+        )
+    except Exception as e2:
+        print(f"[Mirror] fallback failed: {e2}")
+        raise
         except Exception:
             r = requests.post(
                 f"{MEMORY_BASE_URL}/memory/save",
