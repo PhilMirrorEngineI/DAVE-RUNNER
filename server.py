@@ -2,7 +2,7 @@
 # server.py — Dave Runner (PMEi Public Bridge, Postgres Edition)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
-import os, json, time, threading, psycopg2, requests
+import os, json, time, threading, psycopg, requests
 from flask import Flask, request, jsonify
 from typing import Any, Dict, Optional, Tuple
 
@@ -54,8 +54,7 @@ def _bool(v, d=False):
 
 # ────────────── Database ──────────────
 def _get_db():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
-
+    return psycopg.connect(DATABASE_URL)
 def _init_db():
     with _get_db() as conn, conn.cursor() as cur:
         cur.execute("""
