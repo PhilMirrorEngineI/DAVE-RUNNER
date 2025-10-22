@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Render auto-provides this
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 try:
     from openai import OpenAI
@@ -44,8 +44,7 @@ def _get_json():
         return None, _jfail("Invalid or missing JSON body", 400)
 
 def _bool(v, d=False):
-    if isinstance(v, bool):
-        return v
+    if isinstance(v, bool): return v
     if isinstance(v, str):
         v = v.strip().lower()
         if v in ("1","true","yes","on"): return True
@@ -55,6 +54,7 @@ def _bool(v, d=False):
 # ────────────── Database ──────────────
 def _get_db():
     return psycopg.connect(DATABASE_URL)
+
 def _init_db():
     with _get_db() as conn, conn.cursor() as cur:
         cur.execute("""
@@ -87,7 +87,7 @@ def health():
         with _get_db() as conn, conn.cursor() as cur:
             cur.execute("SELECT 1;")
         db_ok = True
-    except Exception as e:
+    except Exception:
         db_ok = False
     return _jok({
         "uptime": int(time.time()) - BOOT_TS,
@@ -95,7 +95,7 @@ def health():
         "db_connected": db_ok
     })
 
-# ────────────── Echo + Reflection ──────────────
+# ────────────── Chat + Reflect ──────────────
 @app.route("/chat", methods=["POST"])
 def chat():
     d, err = _get_json()
@@ -120,7 +120,7 @@ def reflect():
         "ts": int(time.time())
     })
 
-# ────────────── Memory Routes (Postgres) ──────────────
+# ────────────── Memory: Save ──────────────
 @app.route("/memory/save", methods=["POST"])
 def memory_save():
     d, err = _get_json()
@@ -150,9 +150,9 @@ def memory_save():
             "timestamp": str(row[1])
         })
     except Exception as e:
-        print(f"[DB] save error: {e}")
         return _jfail(f"Database error: {e}", 500)
 
+# ────────────── Memory: Get (Latest N) ──────────────
 @app.route("/memory/get", methods=["POST"])
 def memory_get():
     d, err = _get_json()
@@ -177,7 +177,87 @@ def memory_get():
         ]
         return _jok({"count": len(data), "items": data})
     except Exception as e:
-        print(f"[DB] get error: {e}")
+        return _jfail(f"Database error: {e}", 500)
+
+# ────────────── Memory: Search / Retrieve All ──────────────
+@app.route("/memory/search", methods=["POST"])
+def memory_search():
+    d, err = _get_json()
+    if err: return err
+
+    keyword = (d.get("keyword") or "").strip()
+    user = (d.get("user_id") or "").strip()
+    thread = (d.get("thread_id") or "").strip()
+    limit = int(d.get("limit") or 50)
+    date_from = d.get("date_from")
+    date_to = d.get("date_to")
+
+    try:
+        with _get_db() as conn, conn.cursor() as cur:
+            q = "SELECT id, user_id, thread_id, content, drift_score, ts FROM reflections WHERE 1=1"
+            params = []
+
+            if user:
+                q += " AND LOWER(user_id) = LOWER(%s)"
+                params.append(user)
+            if thread:
+                q += " AND LOWER(thread_id) = LOWER(%s)"
+                params.append(thread)
+            if keyword:
+                q += " AND content ILIKE %s"
+                params.append(f"%{keyword}%")
+            if date_from:
+                q += " AND ts >= %s"
+                params.append(date_from)
+            if date_to:
+                q += " AND ts <= %s"
+                params.append(date_to)
+
+            q += " ORDER BY ts DESC LIMIT %s"
+            params.append(limit)
+            cur.execute(q, params)
+            rows = cur.fetchall()
+
+        results = [
+            {
+                "id": r[0],
+                "user_id": r[1],
+                "thread_id": r[2],
+                "content": r[3],
+                "drift_score": r[4],
+                "ts": str(r[5])
+            }
+            for r in rows
+        ]
+
+        return _jok({"count": len(results), "items": results})
+    except Exception as e:
+        return _jfail(f"Database search error: {e}", 500)
+
+# ────────────── Memory: Get All ──────────────
+@app.route("/memory/all", methods=["GET"])
+def memory_all():
+    try:
+        with _get_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, user_id, thread_id, content, drift_score, ts
+                FROM reflections
+                ORDER BY ts DESC;
+            """)
+            rows = cur.fetchall()
+        data = [
+            {
+                "id": r[0],
+                "user_id": r[1],
+                "thread_id": r[2],
+                "content": r[3],
+                "drift_score": r[4],
+                "ts": str(r[5])
+            }
+            for r in rows
+        ]
+        return _jok({"count": len(data), "items": data})
+    except Exception as e:
         return _jfail(f"Database error: {e}", 500)
 
 # ────────────── OpenAI passthrough ──────────────
