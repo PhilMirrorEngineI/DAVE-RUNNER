@@ -1,8 +1,8 @@
 # ──────────────────────────────────────────────
-# server.py — Dave Runner (PMEi Public Bridge)
+# server.py — Dave Runner (PMEi Public Bridge, Postgres Edition)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
-import os, json, time, threading, requests
+import os, json, time, threading, psycopg2, requests
 from flask import Flask, request, jsonify
 from typing import Any, Dict, Optional, Tuple
 
@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Render auto-provides this
 
 try:
     from openai import OpenAI
@@ -17,11 +18,7 @@ try:
 except Exception:
     _openai_client = None
 
-# Function Runner is the memory backend
-MEMORY_BASE_URL = (os.getenv("MEMORY_BASE_URL") or "https://function-runner.onrender.com").rstrip("/")
-MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "").strip()
 BOOT_TS = int(time.time())
-
 app = Flask(__name__)
 
 # ────────────── Helpers ──────────────
@@ -46,18 +43,6 @@ def _get_json():
     except Exception:
         return None, _jfail("Invalid or missing JSON body", 400)
 
-def _safe_json(r: requests.Response):
-    try:
-        return r.json()
-    except Exception:
-        return {"raw": r.text[:1000], "status": r.status_code}
-
-def _mem_headers():
-    h = {"Content-Type": "application/json"}
-    if MEMORY_API_KEY:
-        h["X-API-KEY"] = MEMORY_API_KEY
-    return h
-
 def _bool(v, d=False):
     if isinstance(v, bool):
         return v
@@ -67,6 +52,25 @@ def _bool(v, d=False):
         if v in ("0","false","no","off"): return False
     return d
 
+# ────────────── Database ──────────────
+def _get_db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def _init_db():
+    with _get_db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reflections (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                drift_score REAL DEFAULT 0.0,
+                ts TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        conn.commit()
+_init_db()
+
 # ────────────── Root + Health ──────────────
 @app.route("/")
 def root():
@@ -74,16 +78,22 @@ def root():
         "service": "Dave Runner (PMEi Public)",
         "since": BOOT_TS,
         "openai_enabled": bool(_openai_client),
-        "memory_bridge": bool(MEMORY_BASE_URL)
+        "db_connected": bool(DATABASE_URL)
     })
 
 @app.route("/health")
 @app.route("/healthz")
 def health():
+    try:
+        with _get_db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+        db_ok = True
+    except Exception as e:
+        db_ok = False
     return _jok({
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(_openai_client),
-        "memory_bridge": bool(MEMORY_BASE_URL)
+        "db_connected": db_ok
     })
 
 # ────────────── Echo + Reflection ──────────────
@@ -111,48 +121,67 @@ def reflect():
         "ts": int(time.time())
     })
 
-# ────────────── Public Memory Bridge ──────────────
+# ────────────── Memory Routes (Postgres) ──────────────
 @app.route("/memory/save", methods=["POST"])
 def memory_save():
     d, err = _get_json()
     if err: return err
+    user = (d.get("user_id") or "public").lower()
+    thread = (d.get("thread_id") or "general")
+    content = (d.get("content") or "").strip()
+    drift = float(d.get("drift_score") or 0.0)
+
+    if not content:
+        return _jfail("content required")
+
     try:
-        r = requests.post(
-            f"{MEMORY_BASE_URL}/memory/save",
-            headers=_mem_headers(),
-            data=json.dumps(d),
-            timeout=15
-        )
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_json(r)
-        }), (200 if r.ok else 502)
+        with _get_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO reflections (user_id, thread_id, content, drift_score)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, ts;
+            """, (user, thread, content, drift))
+            row = cur.fetchone()
+            conn.commit()
+        return _jok({
+            "saved": True,
+            "user_id": user,
+            "thread_id": thread,
+            "reflection_id": row[0],
+            "timestamp": str(row[1])
+        })
     except Exception as e:
-        print(f"[Mirror] save error: {e}")
-        return _jfail(f"Upstream error: {e}", 502)
+        print(f"[DB] save error: {e}")
+        return _jfail(f"Database error: {e}", 500)
 
 @app.route("/memory/get", methods=["POST"])
 def memory_get():
     d, err = _get_json()
     if err: return err
-    try:
-        r = requests.post(
-            f"{MEMORY_BASE_URL}/memory/get",
-            headers=_mem_headers(),
-            data=json.dumps(d),
-            timeout=12
-        )
-        return jsonify({
-            "ok": r.ok,
-            "upstream_status": r.status_code,
-            "data": _safe_json(r)
-        }), (200 if r.ok else 502)
-    except Exception as e:
-        print(f"[Mirror] get error: {e}")
-        return _jfail(f"Upstream error: {e}", 502)
+    user = (d.get("user_id") or "public").lower()
+    thread = (d.get("thread_id") or "general")
+    limit = int(d.get("limit") or 10)
 
-# ────────────── OpenAI passthrough (optional) ──────────────
+    try:
+        with _get_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, content, drift_score, ts
+                FROM reflections
+                WHERE user_id=%s AND thread_id=%s
+                ORDER BY ts DESC
+                LIMIT %s;
+            """, (user, thread, limit))
+            rows = cur.fetchall()
+        data = [
+            {"id": r[0], "content": r[1], "drift_score": r[2], "ts": str(r[3])}
+            for r in rows
+        ]
+        return _jok({"count": len(data), "items": data})
+    except Exception as e:
+        print(f"[DB] get error: {e}")
+        return _jfail(f"Database error: {e}", 500)
+
+# ────────────── OpenAI passthrough ──────────────
 @app.route("/openai/chat", methods=["POST"])
 def openai_chat():
     if not _openai_client:
