@@ -54,17 +54,8 @@ def _safe_json(r: requests.Response):
     except Exception:
         return {"raw": r.text[:800], "status": r.status_code}
 
-# >>> patched
 def _mem_headers():
-    key = MEMORY_API_KEY
-    # send both auth styles so either Bearer or X-API-Key works
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {key}",
-        "X-API-Key": key,
-        "X-API-KEY": key
-    }
-# <<<
+    return {"Content-Type": "application/json", "X-API-Key": MEMORY_API_KEY}
 
 def _bool(v, d=False):
     if isinstance(v, bool):
@@ -189,58 +180,60 @@ def image_generate():
 @app.route("/save_memory", methods=["POST"])
 def memory_save_public():
     data, err = _get_json()
-    if err: return err
+    if err:
+        return err
     user = (data.get("user_id") or "").lower()
     if not user:
-        user = "public"  # <<< fallback instead of 403
+        user = "public"
+
     try:
-        # try both lawful and legacy
+        # Primary upstream attempt
         try:
-            # try primary
-try:
-    r = requests.post(
-        f"{MEMORY_BASE_URL}/save_memory",
-        headers=_mem_headers(),
-        data=json.dumps(data),
-        timeout=12
-    )
-except Exception as e1:
-    print(f"[Mirror] primary failed: {e1}")
-    # try fallback
-    try:
-        r = requests.post(
-            f"{MEMORY_BASE_URL}/memory/save",
-            headers=_mem_headers(),
-            data=json.dumps(data),
-            timeout=12
-        )
-    except Exception as e2:
-        print(f"[Mirror] fallback failed: {e2}")
-        raise
-        except Exception:
             r = requests.post(
-                f"{MEMORY_BASE_URL}/memory/save",
+                f"{MEMORY_BASE_URL}/save_memory",
                 headers=_mem_headers(),
                 data=json.dumps(data),
                 timeout=12
             )
+        except Exception as e1:
+            print(f"[Mirror] primary save failed: {e1}")
+            # Fallback to legacy endpoint
+            try:
+                r = requests.post(
+                    f"{MEMORY_BASE_URL}/memory/save",
+                    headers=_mem_headers(),
+                    data=json.dumps(data),
+                    timeout=12
+                )
+            except Exception as e2:
+                print(f"[Mirror] fallback save failed: {e2}")
+                return _jfail(f"Upstream save failed: {e2}", 502)
+
         return jsonify({
             "ok": r.ok,
             "upstream_status": r.status_code,
             "data": _safe_json(r)
         }), (200 if r.ok else 502)
+
     except Exception as e:
+        print(f"[Mirror] unexpected save error: {e}")
         return _jfail(f"Upstream error: {e}", 502)
 
-@app.route("/memory/get_public", methods=["GET"])
-@app.route("/memory/get", methods=["GET"])
-@app.route("/get_memory", methods=["GET"])
+@app.route("/memory/get_public", methods=["GET", "POST"])
+@app.route("/memory/get", methods=["GET", "POST"])
+@app.route("/get_memory", methods=["GET", "POST"])
 def memory_get_public():
-    user = (request.args.get("user_id") or "").lower()
+    if request.method == "POST":
+        args = request.get_json(force=True) or {}
+    else:
+        args = request.args
+
+    user = (args.get("user_id") or "").lower()
+    thread = (args.get("thread_id") or "general")
+    limit = int(args.get("limit") or 20)
     if not user:
-        user = "public"  # <<< fallback instead of 403
-    thread = (request.args.get("thread_id") or "general")
-    limit = int(request.args.get("limit") or 20)
+        user = "public"
+
     try:
         try:
             r = requests.get(
@@ -249,19 +242,23 @@ def memory_get_public():
                 params={"user_id": user, "thread_id": thread, "limit": limit},
                 timeout=12
             )
-        except Exception:
+        except Exception as e1:
+            print(f"[Mirror] primary get failed: {e1}")
             r = requests.get(
                 f"{MEMORY_BASE_URL}/memory/get",
                 headers=_mem_headers(),
                 params={"user_id": user, "thread_id": thread, "limit": limit},
                 timeout=12
             )
+
         return jsonify({
             "ok": r.ok,
             "upstream_status": r.status_code,
             "data": _safe_json(r)
         }), (200 if r.ok else 502)
+
     except Exception as e:
+        print(f"[Mirror] unexpected get error: {e}")
         return _jfail(f"Upstream error: {e}", 502)
 
 # ────────────── Keepalive ──────────────
