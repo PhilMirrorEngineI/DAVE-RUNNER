@@ -55,7 +55,7 @@ def _safe_json(r: requests.Response):
         return {"raw": r.text[:800], "status": r.status_code}
 
 def _mem_headers():
-    return {"Content-Type": "application/json", "X-API-KEY": MEMORY_API_KEY}
+    return {"Content-Type": "application/json", "X-API-Key": MEMORY_API_KEY}
 
 def _bool(v, d=False):
     if isinstance(v, bool):
@@ -176,6 +176,8 @@ def image_generate():
 
 # ────────────── Public Memory Mirrors ──────────────
 @app.route("/memory/save_public", methods=["POST"])
+@app.route("/memory/save", methods=["POST"])
+@app.route("/save_memory", methods=["POST"])
 def memory_save_public():
     data, err = _get_json()
     if err: return err
@@ -183,12 +185,22 @@ def memory_save_public():
     if user not in ["demo", "public"]:
         return _jfail("unauthorised public id", 403)
     try:
-        r = requests.post(
-            f"{MEMORY_BASE_URL}/save_memory",
-            headers=_mem_headers(),
-            data=json.dumps(data),
-            timeout=12
-        )
+        # try both lawful and legacy
+        try:
+            r = requests.post(
+                f"{MEMORY_BASE_URL}/save_memory",
+                headers=_mem_headers(),
+                data=json.dumps(data),
+                timeout=12
+            )
+        except Exception:
+            # fallback to legacy path
+            r = requests.post(
+                f"{MEMORY_BASE_URL}/memory/save",
+                headers=_mem_headers(),
+                data=json.dumps(data),
+                timeout=12
+            )
         return jsonify({
             "ok": r.ok,
             "upstream_status": r.status_code,
@@ -198,6 +210,8 @@ def memory_save_public():
         return _jfail(f"Upstream error: {e}", 502)
 
 @app.route("/memory/get_public", methods=["GET"])
+@app.route("/memory/get", methods=["GET"])
+@app.route("/get_memory", methods=["GET"])
 def memory_get_public():
     user = (request.args.get("user_id") or "").lower()
     thread = (request.args.get("thread_id") or "general")
@@ -205,12 +219,20 @@ def memory_get_public():
     if user not in ["demo", "public"]:
         return _jfail("unauthorised public id", 403)
     try:
-        r = requests.get(
-            f"{MEMORY_BASE_URL}/get_memory",
-            headers=_mem_headers(),
-            params={"user_id": user, "thread_id": thread, "limit": limit},
-            timeout=12
-        )
+        try:
+            r = requests.get(
+                f"{MEMORY_BASE_URL}/get_memory",
+                headers=_mem_headers(),
+                params={"user_id": user, "thread_id": thread, "limit": limit},
+                timeout=12
+            )
+        except Exception:
+            r = requests.get(
+                f"{MEMORY_BASE_URL}/memory/get",
+                headers=_mem_headers(),
+                params={"user_id": user, "thread_id": thread, "limit": limit},
+                timeout=12
+            )
         return jsonify({
             "ok": r.ok,
             "upstream_status": r.status_code,
