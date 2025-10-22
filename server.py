@@ -54,8 +54,17 @@ def _safe_json(r: requests.Response):
     except Exception:
         return {"raw": r.text[:800], "status": r.status_code}
 
+# >>> patched
 def _mem_headers():
-    return {"Content-Type": "application/json", "X-API-Key": MEMORY_API_KEY}
+    key = MEMORY_API_KEY
+    # send both auth styles so either Bearer or X-API-Key works
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "X-API-Key": key,
+        "X-API-KEY": key
+    }
+# <<<
 
 def _bool(v, d=False):
     if isinstance(v, bool):
@@ -182,8 +191,8 @@ def memory_save_public():
     data, err = _get_json()
     if err: return err
     user = (data.get("user_id") or "").lower()
-    if user not in ["demo", "public"]:
-        return _jfail("unauthorised public id", 403)
+    if not user:
+        user = "public"  # <<< fallback instead of 403
     try:
         # try both lawful and legacy
         try:
@@ -194,7 +203,6 @@ def memory_save_public():
                 timeout=12
             )
         except Exception:
-            # fallback to legacy path
             r = requests.post(
                 f"{MEMORY_BASE_URL}/memory/save",
                 headers=_mem_headers(),
@@ -214,10 +222,10 @@ def memory_save_public():
 @app.route("/get_memory", methods=["GET"])
 def memory_get_public():
     user = (request.args.get("user_id") or "").lower()
+    if not user:
+        user = "public"  # <<< fallback instead of 403
     thread = (request.args.get("thread_id") or "general")
     limit = int(request.args.get("limit") or 20)
-    if user not in ["demo", "public"]:
-        return _jfail("unauthorised public id", 403)
     try:
         try:
             r = requests.get(
