@@ -1,82 +1,75 @@
 # ──────────────────────────────────────────────
-# server.py — Dave Runner (PMEi Public Bridge, Postgres Edition)
+# server.py — Dave Runner (PMEi Lawful Reflection Bridge, Postgres Edition)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
-import os, json, time, threading, psycopg, requests
+import os, time, threading, psycopg, requests
 from flask import Flask, request, jsonify
-from typing import Any, Dict, Optional, Tuple
 
-# ────────────── Config ──────────────
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# ────────────── Configuration ──────────────
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL     = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DATABASE_URL     = os.getenv("DATABASE_URL", "").strip()
+SELF_HEALTH_URL  = os.getenv("SELF_HEALTH_URL", "")
+KEEPALIVE_SEC    = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
+ENABLE_KEEPALIVE = os.getenv("ENABLE_KEEPALIVE", "true").lower() in ("1","true","yes")
+LAW_LABEL        = "lawful-reflection"
+BOOT_TS          = int(time.time())
 
 try:
     from openai import OpenAI
-    _openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+    openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 except Exception:
-    _openai_client = None
+    openai_client = None
 
-BOOT_TS = int(time.time())
 app = Flask(__name__)
 
-# ────────────── Helpers ──────────────
-def _jfail(msg, code=400, **extra):
-    r = {"ok": False, "error": msg}
-    r.update(extra)
-    return jsonify(r), code
-
-def _jok(data=None, **extra):
-    r = {"ok": True}
-    if data is not None:
-        r["data"] = data
+# ────────────── Utilities ──────────────
+def ok(data=None, **extra):
+    r = {"ok": True, "ts": int(time.time())}
+    if data: r["data"] = data
     r.update(extra)
     return jsonify(r)
 
-def _get_json():
+def fail(msg, code=400, **extra):
+    r = {"ok": False, "error": msg, "ts": int(time.time())}
+    r.update(extra)
+    return jsonify(r), code
+
+def get_json():
     try:
         d = request.get_json(force=True) or {}
-        if not isinstance(d, dict):
-            return None, _jfail("JSON body must be an object", 400)
+        if not isinstance(d, dict): raise ValueError
         return d, None
     except Exception:
-        return None, _jfail("Invalid or missing JSON body", 400)
+        return None, fail("Invalid or missing JSON body", 400)
 
-def _bool(v, d=False):
-    if isinstance(v, bool): return v
-    if isinstance(v, str):
-        v = v.strip().lower()
-        if v in ("1","true","yes","on"): return True
-        if v in ("0","false","no","off"): return False
-    return d
-
-# ────────────── Database ──────────────
-def _get_db():
+def get_db():
     return psycopg.connect(DATABASE_URL)
 
-def _init_db():
-    with _get_db() as conn, conn.cursor() as cur:
+# ────────────── DB bootstrap ──────────────
+def init_db():
+    with get_db() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reflections (
-                id SERIAL PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                drift_score REAL DEFAULT 0.0,
-                ts TIMESTAMP DEFAULT NOW()
+              id SERIAL PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              thread_id TEXT NOT NULL,
+              content TEXT NOT NULL,
+              drift_score REAL DEFAULT 0.0,
+              seal TEXT DEFAULT 'lawful',
+              ts TIMESTAMP DEFAULT NOW()
             );
         """)
         conn.commit()
-_init_db()
+init_db()
 
-# ────────────── Root + Health ──────────────
+# ────────────── Core routes ──────────────
 @app.route("/")
 def root():
-    return _jok({
-        "service": "Dave Runner (PMEi Public)",
-        "since": BOOT_TS,
-        "openai_enabled": bool(_openai_client),
+    return ok({
+        "service": "Dave Runner — PMEi Lawful Reflection Bridge",
+        "uptime": int(time.time()) - BOOT_TS,
+        "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL)
     })
 
@@ -84,199 +77,100 @@ def root():
 @app.route("/healthz")
 def health():
     try:
-        with _get_db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1;")
+        with get_db() as c, c.cursor() as cur: cur.execute("SELECT 1;")
         db_ok = True
     except Exception:
         db_ok = False
-    return _jok({
-        "uptime": int(time.time()) - BOOT_TS,
-        "openai_enabled": bool(_openai_client),
-        "db_connected": db_ok
-    })
+    return ok({"lawful": True, "db_connected": db_ok})
 
-# ────────────── Chat + Reflect ──────────────
-@app.route("/chat", methods=["POST"])
-def chat():
-    d, err = _get_json()
-    if err: return err
-    msg = (d.get("message") or "").strip()
-    if not msg: return _jfail("message required")
-    return _jok({"reply": f"🪞 Echo: {msg[:1000]}", "ts": int(time.time())})
+@app.route("/status")
+def status():
+    """Extended self-check with drift summary."""
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*), AVG(drift_score) FROM reflections;")
+            count, avg = cur.fetchone()
+    except Exception:
+        count, avg = 0, None
+    return ok({"stored_reflections": count, "avg_drift": round(avg or 0.0, 4)})
 
+# ────────────── Reflection logic ──────────────
 @app.route("/reflect", methods=["POST"])
 def reflect():
-    d, err = _get_json()
+    d, err = get_json()
     if err: return err
     drift = float(d.get("drift_score") or 0.0)
-    clamp = max(min(drift, 0.05), -0.05)
-    status = "OK" if abs(drift) < 0.08 else ("WARN" if abs(drift) < 0.12 else "STOP")
-    return _jok({
+    drift_clamped = max(min(drift, 0.05), -0.05)
+    status = "OK" if abs(drift) < 0.08 else ("WARN" if abs(drift) < 0.12 else "PAUSE")
+    return ok({
         "lawful": True,
         "status": status,
         "drift_in": drift,
-        "drift_clamped": clamp,
-        "reflection": (d.get("content") or "")[:2000],
-        "ts": int(time.time())
+        "drift_clamped": drift_clamped,
+        "reflection_excerpt": (d.get("content") or "")[:500]
     })
 
-# ────────────── Memory: Save ──────────────
+# ────────────── Memory operations ──────────────
 @app.route("/memory/save", methods=["POST"])
 def memory_save():
-    d, err = _get_json()
+    d, err = get_json()
     if err: return err
     user = (d.get("user_id") or "public").lower()
     thread = (d.get("thread_id") or "general")
     content = (d.get("content") or "").strip()
     drift = float(d.get("drift_score") or 0.0)
-
-    if not content:
-        return _jfail("content required")
+    seal = (d.get("seal") or "lawful").strip()
+    if not content: return fail("content required")
 
     try:
-        with _get_db() as conn, conn.cursor() as cur:
+        with get_db() as conn, conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO reflections (user_id, thread_id, content, drift_score)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO reflections (user_id, thread_id, content, drift_score, seal)
+                VALUES (%s,%s,%s,%s,%s)
                 RETURNING id, ts;
-            """, (user, thread, content, drift))
-            row = cur.fetchone()
+            """, (user, thread, content, drift, seal))
+            rid, ts = cur.fetchone()
             conn.commit()
-        return _jok({
-            "saved": True,
-            "user_id": user,
-            "thread_id": thread,
-            "reflection_id": row[0],
-            "timestamp": str(row[1])
-        })
+        return ok({"reflection_id": rid, "user_id": user, "thread_id": thread, "seal": seal, "timestamp": str(ts)})
     except Exception as e:
-        return _jfail(f"Database error: {e}", 500)
+        return fail(f"Database error: {e}", 500)
 
-# ────────────── Memory: Get (Latest N) ──────────────
 @app.route("/memory/get", methods=["POST"])
 def memory_get():
-    d, err = _get_json()
+    d, err = get_json()
     if err: return err
     user = (d.get("user_id") or "public").lower()
     thread = (d.get("thread_id") or "general")
-    limit = int(d.get("limit") or 10)
-
+    limit = min(max(int(d.get("limit") or 10), 1), 200)
     try:
-        with _get_db() as conn, conn.cursor() as cur:
+        with get_db() as conn, conn.cursor() as cur:
             cur.execute("""
-                SELECT id, content, drift_score, ts
+                SELECT id, content, drift_score, seal, ts
                 FROM reflections
                 WHERE user_id=%s AND thread_id=%s
-                ORDER BY ts DESC
-                LIMIT %s;
+                ORDER BY ts DESC LIMIT %s;
             """, (user, thread, limit))
             rows = cur.fetchall()
-        data = [
-            {"id": r[0], "content": r[1], "drift_score": r[2], "ts": str(r[3])}
-            for r in rows
-        ]
-        return _jok({"count": len(data), "items": data})
+        items = [{"id": r[0], "content": r[1], "drift_score": r[2], "seal": r[3], "ts": str(r[4])} for r in rows]
+        return ok({"count": len(items), "items": items})
     except Exception as e:
-        return _jfail(f"Database error: {e}", 500)
+        return fail(f"Database error: {e}", 500)
 
-# ────────────── Memory: Search / Retrieve All ──────────────
-@app.route("/memory/search", methods=["POST"])
-def memory_search():
-    d, err = _get_json()
-    if err: return err
-
-    keyword = (d.get("keyword") or "").strip()
-    user = (d.get("user_id") or "").strip()
-    thread = (d.get("thread_id") or "").strip()
-    limit = int(d.get("limit") or 50)
-    date_from = d.get("date_from")
-    date_to = d.get("date_to")
-
-    try:
-        with _get_db() as conn, conn.cursor() as cur:
-            q = "SELECT id, user_id, thread_id, content, drift_score, ts FROM reflections WHERE 1=1"
-            params = []
-
-            if user:
-                q += " AND LOWER(user_id) = LOWER(%s)"
-                params.append(user)
-            if thread:
-                q += " AND LOWER(thread_id) = LOWER(%s)"
-                params.append(thread)
-            if keyword:
-                q += " AND content ILIKE %s"
-                params.append(f"%{keyword}%")
-            if date_from:
-                q += " AND ts >= %s"
-                params.append(date_from)
-            if date_to:
-                q += " AND ts <= %s"
-                params.append(date_to)
-
-            q += " ORDER BY ts DESC LIMIT %s"
-            params.append(limit)
-            cur.execute(q, params)
-            rows = cur.fetchall()
-
-        results = [
-            {
-                "id": r[0],
-                "user_id": r[1],
-                "thread_id": r[2],
-                "content": r[3],
-                "drift_score": r[4],
-                "ts": str(r[5])
-            }
-            for r in rows
-        ]
-
-        return _jok({"count": len(results), "items": results})
-    except Exception as e:
-        return _jfail(f"Database search error: {e}", 500)
-
-# ────────────── Memory: Get All ──────────────
-@app.route("/memory/all", methods=["GET"])
-def memory_all():
-    try:
-        with _get_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, user_id, thread_id, content, drift_score, ts
-                FROM reflections
-                ORDER BY ts DESC;
-            """)
-            rows = cur.fetchall()
-        data = [
-            {
-                "id": r[0],
-                "user_id": r[1],
-                "thread_id": r[2],
-                "content": r[3],
-                "drift_score": r[4],
-                "ts": str(r[5])
-            }
-            for r in rows
-        ]
-        return _jok({"count": len(data), "items": data})
-    except Exception as e:
-        return _jfail(f"Database error: {e}", 500)
-
-# ────────────── OpenAI passthrough ──────────────
+# ────────────── OpenAI relay ──────────────
 @app.route("/openai/chat", methods=["POST"])
 def openai_chat():
-    if not _openai_client:
-        return _jfail("OpenAI not configured", 503)
-    d, err = _get_json()
+    if not openai_client:
+        return fail("OpenAI not configured", 503)
+    d, err = get_json()
     if err: return err
     msg = (d.get("message") or "").strip()
-    if not msg: return _jfail("message required")
+    if not msg: return fail("message required")
     sys_prompt = (d.get("system") or "You are a concise, lawful assistant.").strip()
-    model = (d.get("model") or OPENAI_MODEL)
     temperature = float(d.get("temperature") or 0.2)
     max_tokens = min(int(d.get("max_tokens") or 512), 4096)
-
     try:
-        resp = _openai_client.chat.completions.create(
-            model=model,
+        resp = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": msg}
@@ -284,31 +178,29 @@ def openai_chat():
             temperature=temperature,
             max_tokens=max_tokens
         )
-        text = resp.choices[0].message.content if resp and resp.choices else ""
-        return _jok({"model": model, "reply": text})
+        reply = resp.choices[0].message.content if resp and resp.choices else ""
+        return ok({"reply": reply, "model": OPENAI_MODEL})
     except Exception as e:
-        return _jfail(f"OpenAI error: {e}", 502)
+        return fail(f"OpenAI error: {e}", 502)
 
 # ────────────── Keepalive ──────────────
-def _keepalive():
-    url = os.getenv("SELF_HEALTH_URL", "")
-    interval = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
-    if not url:
+def keepalive():
+    if not SELF_HEALTH_URL:
         print("[KEEPALIVE] disabled (no SELF_HEALTH_URL)")
         return
-    print(f"[KEEPALIVE] pinging {url} every {interval}s")
+    print(f"[KEEPALIVE] active — ping {SELF_HEALTH_URL} every {KEEPALIVE_SEC}s")
     while True:
         try:
-            requests.get(url, timeout=10)
-            print(f"[KEEPALIVE] ping ok {int(time.time())}")
+            requests.get(SELF_HEALTH_URL, timeout=10)
+            print(f"[KEEPALIVE] ok @ {int(time.time())}")
         except Exception as e:
-            print(f"[KEEPALIVE] error {e}")
-        time.sleep(interval)
+            print(f"[KEEPALIVE] error: {e}")
+        time.sleep(KEEPALIVE_SEC)
 
-if _bool(os.getenv("ENABLE_KEEPALIVE", True)):
-    threading.Thread(target=_keepalive, daemon=True).start()
+if ENABLE_KEEPALIVE:
+    threading.Thread(target=keepalive, daemon=True).start()
 
-# ────────────── Local Dev ──────────────
+# ────────────── Run local ──────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=True)
