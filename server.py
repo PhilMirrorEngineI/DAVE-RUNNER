@@ -49,6 +49,7 @@ def get_db():
 # ────────────── DB bootstrap ──────────────
 def init_db():
     with get_db() as conn, conn.cursor() as cur:
+        # Ensure table exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reflections (
               id SERIAL PRIMARY KEY,
@@ -60,6 +61,22 @@ def init_db():
               ts TIMESTAMP DEFAULT NOW()
             );
         """)
+
+        # Ensure the "seal" column exists (repair if missing)
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'reflections'
+                    AND column_name = 'seal'
+                ) THEN
+                    ALTER TABLE reflections ADD COLUMN seal TEXT DEFAULT 'lawful';
+                END IF;
+            END$$;
+        """)
+
         conn.commit()
 init_db()
 
