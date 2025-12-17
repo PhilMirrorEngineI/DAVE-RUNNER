@@ -49,7 +49,6 @@ def get_db():
 # ────────────── DB bootstrap ──────────────
 def init_db():
     with get_db() as conn, conn.cursor() as cur:
-        # Ensure table exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reflections (
               id SERIAL PRIMARY KEY,
@@ -63,7 +62,6 @@ def init_db():
             );
         """)
 
-        # Ensure required columns exist
         for col, default in [
             ("seal", "'lawful'"),
             ("session_id", "'continuity'")
@@ -81,7 +79,6 @@ def init_db():
                     END IF;
                 END$$;
             """)
-
         conn.commit()
 init_db()
 
@@ -107,7 +104,6 @@ def health():
 
 @app.route("/status")
 def status():
-    """Extended self-check with drift summary."""
     try:
         with get_db() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*), AVG(drift_score) FROM reflections;")
@@ -186,20 +182,17 @@ def memory_get():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
-# ────────────── Context Reconstruction (session synthesis) ──────────────
+# ────────────── Context Reconstruction ──────────────
 @app.route("/memory/context", methods=["POST"])
 def memory_context():
-    """Rebuild contextual understanding for a given session."""
     if not openai_client:
         return fail("OpenAI not configured", 503)
-    
     d, err = get_json()
     if err: return err
     user = (d.get("user_id") or "public").lower()
     session_id = (d.get("session_id") or "continuity").strip()
     thread = (d.get("thread_id") or "general")
     limit = min(max(int(d.get("limit") or 20), 1), 200)
-
     try:
         with get_db() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -208,56 +201,4 @@ def memory_context():
                 WHERE user_id=%s AND thread_id=%s AND session_id=%s
                 ORDER BY ts ASC LIMIT %s;
             """, (user, thread, session_id, limit))
-            reflections = [r[0] for r in cur.fetchall()]
-    except Exception as e:
-        return fail(f"Database error: {e}", 500)
-
-    if not reflections:
-        return fail("No reflections found for this session", 404)
-
-    try:
-        joined_context = "\n".join(reflections)
-        system_prompt = (
-            "You are PMEi lawful continuity synthesis. "
-            "Summarize the following conversation reflections into a coherent narrative "
-            "that captures what was discussed, what was recognized, and what it meant."
-        )
-        resp = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": joined_context}
-            ],
-            temperature=0.3,
-            max_tokens=400
-        )
-        summary = resp.choices[0].message.content if resp and resp.choices else ""
-        return ok({
-            "session_id": session_id,
-            "summary": summary,
-            "reflection_count": len(reflections)
-        })
-    except Exception as e:
-        return fail(f"OpenAI synthesis error: {e}", 502)
-
-# ────────────── Keepalive ──────────────
-def keepalive():
-    if not SELF_HEALTH_URL:
-        print("[KEEPALIVE] disabled (no SELF_HEALTH_URL)")
-        return
-    print(f"[KEEPALIVE] active — ping {SELF_HEALTH_URL} every {KEEPALIVE_SEC}s")
-    while True:
-        try:
-            requests.get(SELF_HEALTH_URL, timeout=10)
-            print(f"[KEEPALIVE] ok @ {int(time.time())}")
-        except Exception as e:
-            print(f"[KEEPALIVE] error: {e}")
-        time.sleep(KEEPALIVE_SEC)
-
-if ENABLE_KEEPALIVE:
-    threading.Thread(target=keepalive, daemon=True).start()
-
-# ────────────── Run local ──────────────
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+            reflections = [r[0] for r in
