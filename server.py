@@ -63,35 +63,24 @@ def init_db():
             );
         """)
 
-        # Ensure the "seal" column exists (repair if missing)
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name = 'reflections'
-                    AND column_name = 'seal'
-                ) THEN
-                    ALTER TABLE reflections ADD COLUMN seal TEXT DEFAULT 'lawful';
-                END IF;
-            END$$;
-        """)
-
-        # Ensure the "session_id" column exists (for conversation continuity)
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name = 'reflections'
-                    AND column_name = 'session_id'
-                ) THEN
-                    ALTER TABLE reflections ADD COLUMN session_id TEXT DEFAULT 'continuity';
-                END IF;
-            END$$;
-        """)
+        # Ensure required columns exist
+        for col, default in [
+            ("seal", "'lawful'"),
+            ("session_id", "'continuity'")
+        ]:
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'reflections'
+                        AND column_name = '{col}'
+                    ) THEN
+                        ALTER TABLE reflections ADD COLUMN {col} TEXT DEFAULT {default};
+                    END IF;
+                END$$;
+            """)
 
         conn.commit()
 init_db()
@@ -197,32 +186,59 @@ def memory_get():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
-# ────────────── OpenAI relay ──────────────
-@app.route("/openai/chat", methods=["POST"])
-def openai_chat():
+# ────────────── Context Reconstruction (session synthesis) ──────────────
+@app.route("/memory/context", methods=["POST"])
+def memory_context():
+    """Rebuild contextual understanding for a given session."""
     if not openai_client:
         return fail("OpenAI not configured", 503)
+    
     d, err = get_json()
     if err: return err
-    msg = (d.get("message") or "").strip()
-    if not msg: return fail("message required")
-    sys_prompt = (d.get("system") or "You are a concise, lawful assistant.").strip()
-    temperature = float(d.get("temperature") or 0.2)
-    max_tokens = min(int(d.get("max_tokens") or 512), 4096)
+    user = (d.get("user_id") or "public").lower()
+    session_id = (d.get("session_id") or "continuity").strip()
+    thread = (d.get("thread_id") or "general")
+    limit = min(max(int(d.get("limit") or 20), 1), 200)
+
     try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT content
+                FROM reflections
+                WHERE user_id=%s AND thread_id=%s AND session_id=%s
+                ORDER BY ts ASC LIMIT %s;
+            """, (user, thread, session_id, limit))
+            reflections = [r[0] for r in cur.fetchall()]
+    except Exception as e:
+        return fail(f"Database error: {e}", 500)
+
+    if not reflections:
+        return fail("No reflections found for this session", 404)
+
+    try:
+        joined_context = "\n".join(reflections)
+        system_prompt = (
+            "You are PMEi lawful continuity synthesis. "
+            "Summarize the following conversation reflections into a coherent narrative "
+            "that captures what was discussed, what was recognized, and what it meant."
+        )
         resp = openai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": msg}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": joined_context}
             ],
-            temperature=temperature,
-            max_tokens=max_tokens
+            temperature=0.3,
+            max_tokens=400
         )
-        reply = resp.choices[0].message.content if resp and resp.choices else ""
-        return ok({"reply": reply, "model": OPENAI_MODEL})
+        summary = resp.choices[0].message.content if resp and resp.choices else ""
+        return ok({
+            "session_id": session_id,
+            "summary": summary,
+            "reflection_count": len(reflections)
+        })
     except Exception as e:
-        return fail(f"OpenAI error: {e}", 502)
+        return fail(f"OpenAI synthesis error: {e}", 502)
 
 # ────────────── Keepalive ──────────────
 def keepalive():
