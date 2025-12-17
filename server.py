@@ -4,6 +4,7 @@
 # ──────────────────────────────────────────────
 import os, time, threading, psycopg, requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # ← Added import for ChatGPT Actions / CORS safety
 
 # ────────────── Configuration ──────────────
 OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "").strip()
@@ -22,6 +23,7 @@ except Exception:
     openai_client = None
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # ← This line fixes 403s from ChatGPT requests
 
 # ────────────── Utilities ──────────────
 def ok(data=None, **extra):
