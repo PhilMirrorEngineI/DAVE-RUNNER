@@ -128,7 +128,7 @@ def reflect():
         "reflection_excerpt": (d.get("content") or "")[:500]
     })
 
-# ────────────── Memory operations ──────────────
+# ────────────── Memory Save ──────────────
 @app.route("/memory/save", methods=["POST"])
 def memory_save():
     d, err = get_json()
@@ -166,6 +166,7 @@ def memory_save():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
+# ────────────── Memory Get ──────────────
 @app.route("/memory/get", methods=["POST"])
 def memory_get():
     d, err = get_json()
@@ -188,7 +189,7 @@ def memory_get():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
-# ────────────── Context Reconstruction ──────────────
+# ────────────── Memory Context ──────────────
 @app.route("/memory/context", methods=["POST"])
 def memory_context():
     if not openai_client:
@@ -232,23 +233,30 @@ def memory_context():
     except Exception as e:
         return fail(f"OpenAI synthesis error: {e}", 502)
 
-# ────────────── Memory Scan Overview (variant-aware) ──────────────
+# ────────────── Memory Scan (variant-aware, fixed) ──────────────
 @app.route("/memory/scan", methods=["POST"])
 def memory_scan():
     d, err = get_json()
-    if err: return err
+    if err:
+        return err
+
     user = (d.get("user_id") or "public").lower()
     include_summary = bool(d.get("summary", True))
     PHIL_THREAD_ALIASES = [
         "continuity", "builder", "harpers", "reflection",
         "pmei", "ethics", "validation", "diary", "summary"
     ]
+
     try:
         with get_db() as conn, conn.cursor() as cur:
             like_user = f"%{user}%"
-            thread_filter = " OR ".join(
-                [f"thread_id ILIKE '%{alias}%'" for alias in PHIL_THREAD_ALIASES]
-            )
+            alias_conditions = []
+            alias_params = []
+            for alias in PHIL_THREAD_ALIASES:
+                alias_conditions.append("thread_id ILIKE %s")
+                alias_params.append(f"%{alias}%")
+            thread_filter = " OR ".join(alias_conditions)
+
             query = f"""
                 SELECT session_id, thread_id, COUNT(*), ROUND(AVG(drift_score)::numeric,4),
                        MIN(ts), MAX(ts)
@@ -257,8 +265,9 @@ def memory_scan():
                 GROUP BY session_id, thread_id
                 ORDER BY MAX(ts) DESC;
             """
-            cur.execute(query, (like_user,))
+            cur.execute(query, [like_user] + alias_params)
             rows = cur.fetchall()
+
         sessions = [{
             "session_id": r[0],
             "thread_id": r[1],
@@ -267,7 +276,9 @@ def memory_scan():
             "first_ts": str(r[4]),
             "last_ts": str(r[5])
         } for r in rows]
+
         result = {"user_id": user, "session_count": len(sessions), "sessions": sessions}
+
         if include_summary and openai_client and sessions:
             context_lines = [
                 f"Session {s['session_id']} ({s['thread_id']}): {s['total_reflections']} reflections, avg drift {s['avg_drift']}."
@@ -275,7 +286,7 @@ def memory_scan():
             ]
             system_prompt = (
                 "You are PMEi lawful continuity synthesis. Summarize the user's reflection landscape "
-                "across all Phil variants, including drift stability and thread coherence."
+                "across all Phil variants, noting drift stability and thread coherence."
             )
             resp = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -287,15 +298,19 @@ def memory_scan():
                 max_tokens=350
             )
             result["summary"] = resp.choices[0].message.content.strip()
+
         return ok(result)
+
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
-# ────────────── Combined Context + Scan (variant-aware) ──────────────
+# ────────────── Memory Context + Scan (variant-aware, fixed) ──────────────
 @app.route("/memory/context-scan", methods=["POST"])
 def memory_context_scan():
     d, err = get_json()
-    if err: return err
+    if err:
+        return err
+
     user = (d.get("user_id") or "public").lower()
     thread = (d.get("thread_id") or "general")
     session_id = (d.get("session_id") or "continuity").strip()
@@ -306,6 +321,7 @@ def memory_context_scan():
         "pmei", "ethics", "validation", "diary", "summary"
     ]
     context_result, scan_result = {}, {}
+
     try:
         if openai_client:
             with get_db() as conn, conn.cursor() as cur:
@@ -318,8 +334,8 @@ def memory_context_scan():
             if reflections:
                 joined_context = "\n".join(reflections)
                 system_prompt = (
-                    "You are PMEi lawful continuity synthesis. Summarize this session's reflections "
-                    "and identify continuity and lawful drift trends."
+                    "You are PMEi lawful continuity synthesis. Summarize this session’s reflections, "
+                    "highlighting lawful drift and continuity insights."
                 )
                 resp = openai_client.chat.completions.create(
                     model=OPENAI_MODEL,
@@ -337,12 +353,16 @@ def memory_context_scan():
                 }
     except Exception as e:
         context_result = {"error": str(e)}
+
     try:
         with get_db() as conn, conn.cursor() as cur:
             like_user = f"%{user}%"
-            thread_filter = " OR ".join(
-                [f"thread_id ILIKE '%{alias}%'" for alias in PHIL_THREAD_ALIASES]
-            )
+            alias_conditions = []
+            alias_params = []
+            for alias in PHIL_THREAD_ALIASES:
+                alias_conditions.append("thread_id ILIKE %s")
+                alias_params.append(f"%{alias}%")
+            thread_filter = " OR ".join(alias_conditions)
             query = f"""
                 SELECT session_id, thread_id, COUNT(*), ROUND(AVG(drift_score)::numeric,4),
                        MIN(ts), MAX(ts)
@@ -351,8 +371,9 @@ def memory_context_scan():
                 GROUP BY session_id, thread_id
                 ORDER BY MAX(ts) DESC;
             """
-            cur.execute(query, (like_user,))
+            cur.execute(query, [like_user] + alias_params)
             rows = cur.fetchall()
+
         sessions = [{
             "session_id": r[0],
             "thread_id": r[1],
@@ -361,15 +382,17 @@ def memory_context_scan():
             "first_ts": str(r[4]),
             "last_ts": str(r[5])
         } for r in rows]
+
         scan_result = {"user_id": user, "session_count": len(sessions), "sessions": sessions}
+
         if include_summary and openai_client and sessions:
             context_lines = [
                 f"Session {s['session_id']} ({s['thread_id']}): {s['total_reflections']} reflections, avg drift {s['avg_drift']}."
                 for s in sessions
             ]
             system_prompt = (
-                "You are PMEi lawful continuity synthesis. Combine all Phil variants and sessions "
-                "into a single reflective continuity overview."
+                "You are PMEi lawful continuity synthesis. Provide an integrated narrative summary "
+                "combining all Phil variants and threads into one continuity overview."
             )
             resp = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -381,8 +404,10 @@ def memory_context_scan():
                 max_tokens=400
             )
             scan_result["summary"] = resp.choices[0].message.content.strip()
+
     except Exception as e:
         scan_result = {"error": str(e)}
+
     return ok({"context_result": context_result, "scan_result": scan_result})
 
 # ────────────── Keepalive ──────────────
