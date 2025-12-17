@@ -283,6 +283,126 @@ def memory_scan():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
+# ────────────── Combined Context + Scan ──────────────
+@app.route("/memory/context-scan", methods=["POST"])
+def memory_context_scan():
+    """
+    Combined operation that first updates the narrative context for the active session,
+    then performs a global reflection scan across all sessions for the same user.
+    Returns both results for continuity diagnostics.
+    """
+    d, err = get_json()
+    if err: 
+        return err
+
+    user = (d.get("user_id") or "public").lower()
+    thread = (d.get("thread_id") or "general")
+    session_id = (d.get("session_id") or "continuity").strip()
+    limit = min(max(int(d.get("limit") or 20), 1), 200)
+    include_summary = bool(d.get("summary", True))
+
+    context_result = None
+    scan_result = None
+
+    # Step 1 — Generate updated session context
+    try:
+        if openai_client:
+            with get_db() as conn, conn.cursor() as cur:
+                cur.execute("""
+                    SELECT content
+                    FROM reflections
+                    WHERE user_id=%s AND thread_id=%s AND session_id=%s
+                    ORDER BY ts ASC LIMIT %s;
+                """, (user, thread, session_id, limit))
+                reflections = [r[0] for r in cur.fetchall()]
+
+            if reflections:
+                joined_context = "\n".join(reflections)
+                system_prompt = (
+                    "You are PMEi lawful continuity synthesis. Summarize the following "
+                    "conversation reflections into a coherent narrative describing what was discussed, recognized, and understood."
+                )
+                resp = openai_client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": joined_context}
+                    ],
+                    temperature=0.3,
+                    max_tokens=400
+                )
+                context_summary = resp.choices[0].message.content if resp and resp.choices else ""
+                context_result = {
+                    "session_id": session_id,
+                    "summary": context_summary,
+                    "reflection_count": len(reflections)
+                }
+            else:
+                context_result = {"session_id": session_id, "summary": "No reflections found."}
+        else:
+            context_result = {"summary": "OpenAI not configured", "ok": False}
+    except Exception as e:
+        context_result = {"error": f"Context generation failed: {e}"}
+
+    # Step 2 — Perform global scan
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT session_id, thread_id, COUNT(*), ROUND(AVG(drift_score)::numeric,4),
+                       MIN(ts), MAX(ts)
+                FROM reflections
+                WHERE user_id=%s
+                GROUP BY session_id, thread_id
+                ORDER BY MAX(ts) DESC;
+            """, (user,))
+            rows = cur.fetchall()
+        sessions = [{
+            "session_id": r[0],
+            "thread_id": r[1],
+            "total_reflections": int(r[2]),
+            "avg_drift": float(r[3] or 0.0),
+            "first_ts": str(r[4]),
+            "last_ts": str(r[5])
+        } for r in rows]
+
+        scan_result = {
+            "user_id": user,
+            "session_count": len(sessions),
+            "sessions": sessions
+        }
+
+        if include_summary and openai_client and sessions:
+            try:
+                context_lines = [
+                    f"Session {s['session_id']} ({s['thread_id']}): {s['total_reflections']} reflections, avg drift {s['avg_drift']}."
+                    for s in sessions
+                ]
+                system_prompt = (
+                    "You are PMEi lawful continuity synthesis. Summarize the user's reflection landscape "
+                    "into a concise narrative describing ongoing themes and system stability."
+                )
+                resp = openai_client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "\n".join(context_lines)}
+                    ],
+                    temperature=0.2,
+                    max_tokens=300
+                )
+                scan_result["summary"] = resp.choices[0].message.content.strip()
+            except Exception as e:
+                scan_result["summary"] = f"Summary unavailable: {e}"
+
+    except Exception as e:
+        scan_result = {"error": f"Scan failed: {e}"}
+
+    # Combine results
+    return ok({
+        "context_result": context_result,
+        "scan_result": scan_result
+    })
+
 # ────────────── Keepalive ──────────────
 def keepalive():
     if not SELF_HEALTH_URL:
