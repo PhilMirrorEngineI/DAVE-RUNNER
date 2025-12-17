@@ -58,6 +58,7 @@ def init_db():
               content TEXT NOT NULL,
               drift_score REAL DEFAULT 0.0,
               seal TEXT DEFAULT 'lawful',
+              session_id TEXT DEFAULT 'continuity',
               ts TIMESTAMP DEFAULT NOW()
             );
         """)
@@ -73,6 +74,21 @@ def init_db():
                     AND column_name = 'seal'
                 ) THEN
                     ALTER TABLE reflections ADD COLUMN seal TEXT DEFAULT 'lawful';
+                END IF;
+            END$$;
+        """)
+
+        # Ensure the "session_id" column exists (for conversation continuity)
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'reflections'
+                    AND column_name = 'session_id'
+                ) THEN
+                    ALTER TABLE reflections ADD COLUMN session_id TEXT DEFAULT 'continuity';
                 END IF;
             END$$;
         """)
@@ -137,18 +153,26 @@ def memory_save():
     content = (d.get("content") or "").strip()
     drift = float(d.get("drift_score") or 0.0)
     seal = (d.get("seal") or "lawful").strip()
+    session_id = (d.get("session_id") or "continuity").strip()
     if not content: return fail("content required")
 
     try:
         with get_db() as conn, conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO reflections (user_id, thread_id, content, drift_score, seal)
-                VALUES (%s,%s,%s,%s,%s)
+                INSERT INTO reflections (user_id, thread_id, content, drift_score, seal, session_id)
+                VALUES (%s,%s,%s,%s,%s,%s)
                 RETURNING id, ts;
-            """, (user, thread, content, drift, seal))
+            """, (user, thread, content, drift, seal, session_id))
             rid, ts = cur.fetchone()
             conn.commit()
-        return ok({"reflection_id": rid, "user_id": user, "thread_id": thread, "seal": seal, "timestamp": str(ts)})
+        return ok({
+            "reflection_id": rid,
+            "user_id": user,
+            "thread_id": thread,
+            "seal": seal,
+            "session_id": session_id,
+            "timestamp": str(ts)
+        })
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
@@ -162,13 +186,13 @@ def memory_get():
     try:
         with get_db() as conn, conn.cursor() as cur:
             cur.execute("""
-                SELECT id, content, drift_score, seal, ts
+                SELECT id, content, drift_score, seal, session_id, ts
                 FROM reflections
                 WHERE user_id=%s AND thread_id=%s
                 ORDER BY ts DESC LIMIT %s;
             """, (user, thread, limit))
             rows = cur.fetchall()
-        items = [{"id": r[0], "content": r[1], "drift_score": r[2], "seal": r[3], "ts": str(r[4])} for r in rows]
+        items = [{"id": r[0], "content": r[1], "drift_score": r[2], "seal": r[3], "session_id": r[4], "ts": str(r[5])} for r in rows]
         return ok({"count": len(items), "items": items})
     except Exception as e:
         return fail(f"Database error: {e}", 500)
