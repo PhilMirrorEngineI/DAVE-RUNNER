@@ -14,12 +14,12 @@ OPENAI_MODEL     = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DATABASE_URL     = os.getenv("DATABASE_URL", "").strip()
 SELF_HEALTH_URL  = os.getenv("SELF_HEALTH_URL", "")
 KEEPALIVE_SEC    = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
-ENABLE_KEEPALIVE = os.getenv("ENABLE_KEEPALIVE", "true").lower() in ("1","true","yes")
+ENABLE_KEEPALIVE = os.getenv("ENABLE_KEEPALIVE", "true").lower() in ("1", "true", "yes")
 LAW_LABEL        = "lawful-reflection"
 BOOT_TS          = int(time.time())
 
 # Security / ownership
-# Add these in Render environment variables:
+# Render env vars:
 # DAVE_RUNNER_API_KEY=<long random secret>
 # OWNER_USER_ID=phil
 DAVE_RUNNER_API_KEY = os.getenv("DAVE_RUNNER_API_KEY", "").strip()
@@ -32,10 +32,6 @@ except Exception:
     openai_client = None
 
 app = Flask(__name__)
-
-# NOTE:
-# CORS is still open for compatibility with current GPT/actions/browser clients.
-# The memory routes below are protected by X-API-KEY.
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ────────────── Utilities ──────────────
@@ -64,10 +60,6 @@ def get_db():
     return psycopg.connect(DATABASE_URL)
 
 def require_api_key():
-    """
-    Simple single-owner API protection.
-    Protects memory reads/writes from callers who know or guess user_id.
-    """
     if not DAVE_RUNNER_API_KEY:
         return False
     supplied = request.headers.get("X-API-KEY", "").strip()
@@ -79,16 +71,9 @@ def require_memory_auth():
     return None
 
 def owner_user_id():
-    """
-    Do not trust caller-supplied user_id for protected memory routes.
-    """
     return OWNER_USER_ID
 
 def as_json_list(value):
-    """
-    Ensures JSONB list fields are always stored as arrays.
-    Accepts list, tuple, string, or missing value.
-    """
     if value is None:
         return []
     if isinstance(value, list):
@@ -100,7 +85,23 @@ def as_json_list(value):
         return [stripped] if stripped else []
     return [value]
 
+def as_json_object(value):
+    return value if isinstance(value, dict) else {}
+
 # ────────────── DB bootstrap ──────────────
+def add_column_if_missing(cur, table, col, ddl):
+    cur.execute(f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = '{table}' AND column_name = '{col}'
+            ) THEN
+                ALTER TABLE {table} ADD COLUMN {col} {ddl};
+            END IF;
+        END$$;
+    """)
+
 def init_db():
     with get_db() as conn, conn.cursor() as cur:
         # Legacy reflection journal table
@@ -116,24 +117,10 @@ def init_db():
               ts TIMESTAMP DEFAULT NOW()
             );
         """)
-        for col, default in [
-            ("seal", "'lawful'"),
-            ("session_id", "'continuity'")
-        ]:
-            cur.execute(f"""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'reflections' AND column_name = '{col}'
-                    ) THEN
-                        ALTER TABLE reflections ADD COLUMN {col} TEXT DEFAULT {default};
-                    END IF;
-                END$$;
-            """)
+        add_column_if_missing(cur, "reflections", "seal", "TEXT DEFAULT 'lawful'")
+        add_column_if_missing(cur, "reflections", "session_id", "TEXT DEFAULT 'continuity'")
 
-        # New structured continuity table.
-        # This does not migrate or disturb existing reflections.
+        # Structured continuity table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS continuity_records (
               id SERIAL PRIMARY KEY,
@@ -156,35 +143,47 @@ def init_db():
               active_constraints JSONB DEFAULT '[]'::jsonb,
               key_insights JSONB DEFAULT '[]'::jsonb,
               open_threads JSONB DEFAULT '[]'::jsonb,
-
               context_shard TEXT,
               anchor_points JSONB DEFAULT '[]'::jsonb,
-
               last_stable_state TEXT,
+
+              -- Adaptive/self-learning continuity layer
+              learning_events JSONB DEFAULT '[]'::jsonb,
+              successful_patterns JSONB DEFAULT '[]'::jsonb,
+              failed_patterns JSONB DEFAULT '[]'::jsonb,
+              capability_scores JSONB DEFAULT '{}'::jsonb,
+              adaptation_notes TEXT,
+              recommended_actions JSONB DEFAULT '[]'::jsonb,
+
               seal TEXT DEFAULT 'lawful'
             );
         """)
 
-        # Human-readable continuity layer migration for existing deployments.
-        for col, ddl in [
+        # Migrations for existing deployments
+        continuity_cols = [
             ("human_title", "TEXT"),
             ("human_summary", "TEXT"),
             ("decision_made", "TEXT"),
             ("why_it_matters", "TEXT"),
             ("next_steps", "JSONB DEFAULT '[]'::jsonb"),
-            ("chat_recall", "JSONB DEFAULT '[]'::jsonb")
-        ]:
-            cur.execute(f"""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'continuity_records' AND column_name = '{col}'
-                    ) THEN
-                        ALTER TABLE continuity_records ADD COLUMN {col} {ddl};
-                    END IF;
-                END$$;
-            """)
+            ("chat_recall", "JSONB DEFAULT '[]'::jsonb"),
+            ("goal_state", "TEXT"),
+            ("active_constraints", "JSONB DEFAULT '[]'::jsonb"),
+            ("key_insights", "JSONB DEFAULT '[]'::jsonb"),
+            ("open_threads", "JSONB DEFAULT '[]'::jsonb"),
+            ("context_shard", "TEXT"),
+            ("anchor_points", "JSONB DEFAULT '[]'::jsonb"),
+            ("last_stable_state", "TEXT"),
+            ("learning_events", "JSONB DEFAULT '[]'::jsonb"),
+            ("successful_patterns", "JSONB DEFAULT '[]'::jsonb"),
+            ("failed_patterns", "JSONB DEFAULT '[]'::jsonb"),
+            ("capability_scores", "JSONB DEFAULT '{}'::jsonb"),
+            ("adaptation_notes", "TEXT"),
+            ("recommended_actions", "JSONB DEFAULT '[]'::jsonb"),
+            ("seal", "TEXT DEFAULT 'lawful'")
+        ]
+        for col, ddl in continuity_cols:
+            add_column_if_missing(cur, "continuity_records", col, ddl)
 
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_continuity_user_session_ts
@@ -201,6 +200,14 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_continuity_active_constraints
             ON continuity_records USING GIN (active_constraints);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_continuity_learning_events
+            ON continuity_records USING GIN (learning_events);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_continuity_successful_patterns
+            ON continuity_records USING GIN (successful_patterns);
         """)
 
         conn.commit()
@@ -233,40 +240,29 @@ def health():
         "db_connected": db_ok,
         "auth_configured": bool(DAVE_RUNNER_API_KEY)
     })
+
 @app.route("/privacy")
 def privacy():
     return """
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>Dave Runner Privacy Policy</title>
-    </head>
+    <head><title>Dave Runner Privacy Policy</title></head>
     <body>
         <h1>Dave Runner Privacy Policy</h1>
-
-        <p>
-        Dave Runner stores user-provided continuity records, reflections,
-        diary entries, and structured memory data for retrieval,
-        synthesis, continuity reconstruction, and PMEi system operation.
-        </p>
-
-        <p>
-        Data is not sold to third parties.
-        Data is retained solely for continuity, memory retrieval,
-        lawful reflection, and PMEi functionality.
-        </p>
-
-        <p>
-        Users should not store passwords, payment information,
-        government identifiers, or sensitive credentials in memory records.
-        </p>
-
-        <p>
-        Service: Dave Runner – PMEi Lawful Reflection Bridge
-        </p>
+        <p>Dave Runner stores user-provided continuity records, reflections,
+        diary entries, structured memory data, and adaptive learning records
+        for retrieval, synthesis, continuity reconstruction, PMEi system operation,
+        and benchmark-driven improvement.</p>
+        <p>Data is not sold to third parties. Data is retained solely for continuity,
+        memory retrieval, lawful reflection, PMEi functionality, and user-directed
+        system improvement.</p>
+        <p>Users should not store passwords, payment information, government identifiers,
+        or sensitive credentials in memory records.</p>
+        <p>Service: Dave Runner – PMEi Lawful Reflection Bridge</p>
     </body>
     </html>
     """
+
 @app.route("/status")
 def status():
     try:
@@ -444,7 +440,7 @@ def memory_context():
     except Exception as e:
         return fail(f"OpenAI synthesis error: {e}", 502)
 
-# ────────────── Memory Scan (variant-aware, protected) ──────────────
+# ────────────── Memory Scan ──────────────
 @app.route("/memory/scan", methods=["POST"])
 def memory_scan():
     auth_err = require_memory_auth()
@@ -514,11 +510,10 @@ def memory_scan():
             result["summary"] = resp.choices[0].message.content.strip()
 
         return ok(result)
-
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
-# ────────────── Memory Context + Scan (variant-aware, protected) ──────────────
+# ────────────── Memory Context + Scan ──────────────
 @app.route("/memory/context-scan", methods=["POST"])
 def memory_context_scan():
     auth_err = require_memory_auth()
@@ -623,11 +618,56 @@ def memory_context_scan():
                 max_tokens=400
             )
             scan_result["summary"] = resp.choices[0].message.content.strip()
-
     except Exception as e:
         scan_result = {"error": str(e)}
 
     return ok({"context_result": context_result, "scan_result": scan_result})
+
+CONTINUITY_SELECT = """
+    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+           human_title, human_summary, decision_made, why_it_matters,
+           next_steps, chat_recall,
+           goal_state, active_constraints, key_insights, open_threads,
+           context_shard, anchor_points, last_stable_state,
+           learning_events, successful_patterns, failed_patterns,
+           capability_scores, adaptation_notes, recommended_actions,
+           seal
+    FROM continuity_records
+"""
+
+def continuity_row_to_item(r):
+    return {
+        "id": r[0],
+        "save_id": r[1],
+        "user_id": r[2],
+        "timestamp": str(r[3]),
+        "session_ref": r[4],
+        "drift_score": r[5],
+        "human_brief": {
+            "title": r[6],
+            "summary": r[7],
+            "decision_made": r[8],
+            "why_it_matters": r[9],
+            "next_steps": r[10],
+            "chat_recall": r[11]
+        },
+        "goal_state": r[12],
+        "active_constraints": r[13],
+        "key_insights": r[14],
+        "open_threads": r[15],
+        "context_shard": r[16],
+        "anchor_points": r[17],
+        "last_stable_state": r[18],
+        "learning_layer": {
+            "learning_events": r[19],
+            "successful_patterns": r[20],
+            "failed_patterns": r[21],
+            "capability_scores": r[22],
+            "adaptation_notes": r[23],
+            "recommended_actions": r[24]
+        },
+        "seal": r[25]
+    }
 
 # ────────────── Structured Continuity Save ──────────────
 @app.route("/memory/continuity/save", methods=["POST"])
@@ -650,9 +690,7 @@ def continuity_save():
     drift = float(d.get("drift_score") or 0.0)
     seal = (d.get("seal") or "lawful").strip()
 
-    # Human-readable continuity layer.
-    # These fields make each save understandable months later without needing
-    # to reconstruct meaning from machine-state fields alone.
+    # Human-readable continuity layer
     human_title = (d.get("human_title") or "").strip()
     human_summary = (d.get("human_summary") or "").strip()
     decision_made = (d.get("decision_made") or "").strip()
@@ -660,21 +698,32 @@ def continuity_save():
     next_steps = as_json_list(d.get("next_steps"))
     chat_recall = as_json_list(d.get("chat_recall"))
 
+    # Machine-readable continuity layer
     goal_state = (d.get("goal_state") or "").strip()
-    context_shard = (d.get("context_shard") or "").strip()
-    last_stable_state = (d.get("last_stable_state") or "").strip() or None
-
     active_constraints = as_json_list(d.get("active_constraints"))
     key_insights = as_json_list(d.get("key_insights"))
     open_threads = as_json_list(d.get("open_threads"))
+    context_shard = (d.get("context_shard") or "").strip()
     anchor_points = as_json_list(d.get("anchor_points"))
+    last_stable_state = (d.get("last_stable_state") or "").strip() or None
 
-    timestamp = d.get("timestamp")  # Optional ISO timestamp. If missing, DB NOW() is used.
+    # Adaptive/self-learning layer
+    learning_events = as_json_list(d.get("learning_events"))
+    successful_patterns = as_json_list(d.get("successful_patterns"))
+    failed_patterns = as_json_list(d.get("failed_patterns"))
+    capability_scores = as_json_object(d.get("capability_scores"))
+    adaptation_notes = (d.get("adaptation_notes") or "").strip()
+    recommended_actions = as_json_list(d.get("recommended_actions"))
 
-    if not any([goal_state, context_shard, anchor_points, human_title, human_summary, decision_made, why_it_matters]):
+    timestamp = d.get("timestamp")
+
+    if not any([
+        goal_state, context_shard, anchor_points, human_title, human_summary,
+        decision_made, why_it_matters, learning_events, successful_patterns,
+        failed_patterns, adaptation_notes, recommended_actions
+    ]):
         return fail(
-            "At least one continuity field is required "
-            "(goal_state, context_shard, anchor_points, human_title, human_summary, decision_made, or why_it_matters)",
+            "At least one continuity or learning field is required",
             400
         )
 
@@ -687,16 +736,22 @@ def continuity_save():
                         human_title, human_summary, decision_made, why_it_matters,
                         next_steps, chat_recall,
                         goal_state, active_constraints, key_insights, open_threads,
-                        context_shard, anchor_points, last_stable_state, seal
+                        context_shard, anchor_points, last_stable_state,
+                        learning_events, successful_patterns, failed_patterns,
+                        capability_scores, adaptation_notes, recommended_actions,
+                        seal
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id, timestamp;
                 """, (
                     save_id, user, timestamp, session_ref, drift,
                     human_title, human_summary, decision_made, why_it_matters,
                     Jsonb(next_steps), Jsonb(chat_recall),
                     goal_state, Jsonb(active_constraints), Jsonb(key_insights), Jsonb(open_threads),
-                    context_shard, Jsonb(anchor_points), last_stable_state, seal
+                    context_shard, Jsonb(anchor_points), last_stable_state,
+                    Jsonb(learning_events), Jsonb(successful_patterns), Jsonb(failed_patterns),
+                    Jsonb(capability_scores), adaptation_notes, Jsonb(recommended_actions),
+                    seal
                 ))
             else:
                 cur.execute("""
@@ -705,16 +760,22 @@ def continuity_save():
                         human_title, human_summary, decision_made, why_it_matters,
                         next_steps, chat_recall,
                         goal_state, active_constraints, key_insights, open_threads,
-                        context_shard, anchor_points, last_stable_state, seal
+                        context_shard, anchor_points, last_stable_state,
+                        learning_events, successful_patterns, failed_patterns,
+                        capability_scores, adaptation_notes, recommended_actions,
+                        seal
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id, timestamp;
                 """, (
                     save_id, user, session_ref, drift,
                     human_title, human_summary, decision_made, why_it_matters,
                     Jsonb(next_steps), Jsonb(chat_recall),
                     goal_state, Jsonb(active_constraints), Jsonb(key_insights), Jsonb(open_threads),
-                    context_shard, Jsonb(anchor_points), last_stable_state, seal
+                    context_shard, Jsonb(anchor_points), last_stable_state,
+                    Jsonb(learning_events), Jsonb(successful_patterns), Jsonb(failed_patterns),
+                    Jsonb(capability_scores), adaptation_notes, Jsonb(recommended_actions),
+                    seal
                 ))
 
             rid, ts = cur.fetchone()
@@ -736,6 +797,14 @@ def continuity_save():
                 "why_it_matters": why_it_matters,
                 "next_steps": next_steps,
                 "chat_recall": chat_recall
+            },
+            "learning_layer": {
+                "learning_events": learning_events,
+                "successful_patterns": successful_patterns,
+                "failed_patterns": failed_patterns,
+                "capability_scores": capability_scores,
+                "adaptation_notes": adaptation_notes,
+                "recommended_actions": recommended_actions
             }
         })
 
@@ -763,36 +832,18 @@ def continuity_get():
     try:
         with get_db() as conn, conn.cursor() as cur:
             if save_id:
-                cur.execute("""
-                    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-                           human_title, human_summary, decision_made, why_it_matters,
-                           next_steps, chat_recall,
-                           goal_state, active_constraints, key_insights, open_threads,
-                           context_shard, anchor_points, last_stable_state, seal
-                    FROM continuity_records
+                cur.execute(CONTINUITY_SELECT + """
                     WHERE user_id=%s AND save_id=%s
                     LIMIT 1;
                 """, (user, save_id))
             elif session_ref:
-                cur.execute("""
-                    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-                           human_title, human_summary, decision_made, why_it_matters,
-                           next_steps, chat_recall,
-                           goal_state, active_constraints, key_insights, open_threads,
-                           context_shard, anchor_points, last_stable_state, seal
-                    FROM continuity_records
+                cur.execute(CONTINUITY_SELECT + """
                     WHERE user_id=%s AND session_ref=%s
                     ORDER BY timestamp DESC
                     LIMIT %s;
                 """, (user, session_ref, limit))
             else:
-                cur.execute("""
-                    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-                           human_title, human_summary, decision_made, why_it_matters,
-                           next_steps, chat_recall,
-                           goal_state, active_constraints, key_insights, open_threads,
-                           context_shard, anchor_points, last_stable_state, seal
-                    FROM continuity_records
+                cur.execute(CONTINUITY_SELECT + """
                     WHERE user_id=%s
                     ORDER BY timestamp DESC
                     LIMIT %s;
@@ -800,32 +851,7 @@ def continuity_get():
 
             rows = cur.fetchall()
 
-        items = [{
-            "id": r[0],
-            "save_id": r[1],
-            "user_id": r[2],
-            "timestamp": str(r[3]),
-            "session_ref": r[4],
-            "drift_score": r[5],
-            "human_brief": {
-                "title": r[6],
-                "summary": r[7],
-                "decision_made": r[8],
-                "why_it_matters": r[9],
-                "next_steps": r[10],
-                "chat_recall": r[11]
-            },
-            "goal_state": r[12],
-            "active_constraints": r[13],
-            "key_insights": r[14],
-            "open_threads": r[15],
-            "context_shard": r[16],
-            "anchor_points": r[17],
-            "last_stable_state": r[18],
-            "seal": r[19]
-        } for r in rows]
-
-        return ok({"count": len(items), "items": items})
+        return ok({"count": len(rows), "items": [continuity_row_to_item(r) for r in rows]})
 
     except Exception as e:
         return fail(f"Database error: {e}", 500)
@@ -846,11 +872,7 @@ def continuity_latest():
 
     try:
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-                       goal_state, active_constraints, key_insights, open_threads,
-                       context_shard, anchor_points, last_stable_state, seal
-                FROM continuity_records
+            cur.execute(CONTINUITY_SELECT + """
                 WHERE user_id=%s AND session_ref=%s
                 ORDER BY timestamp DESC
                 LIMIT 1;
@@ -860,32 +882,7 @@ def continuity_latest():
         if not row:
             return fail("No continuity record found", 404)
 
-        item = {
-            "id": row[0],
-            "save_id": row[1],
-            "user_id": row[2],
-            "timestamp": str(row[3]),
-            "session_ref": row[4],
-            "drift_score": row[5],
-            "human_brief": {
-                "title": row[6],
-                "summary": row[7],
-                "decision_made": row[8],
-                "why_it_matters": row[9],
-                "next_steps": row[10],
-                "chat_recall": row[11]
-            },
-            "goal_state": row[12],
-            "active_constraints": row[13],
-            "key_insights": row[14],
-            "open_threads": row[15],
-            "context_shard": row[16],
-            "anchor_points": row[17],
-            "last_stable_state": row[18],
-            "seal": row[19]
-        }
-
-        return ok(item)
+        return ok(continuity_row_to_item(row))
 
     except Exception as e:
         return fail(f"Database error: {e}", 500)
