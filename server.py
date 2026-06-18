@@ -203,7 +203,40 @@ def health():
         "db_connected": db_ok,
         "auth_configured": bool(DAVE_RUNNER_API_KEY)
     })
+@app.route("/privacy")
+def privacy():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Dave Runner Privacy Policy</title>
+    </head>
+    <body>
+        <h1>Dave Runner Privacy Policy</h1>
 
+        <p>
+        Dave Runner stores user-provided continuity records, reflections,
+        diary entries, and structured memory data for retrieval,
+        synthesis, continuity reconstruction, and PMEi system operation.
+        </p>
+
+        <p>
+        Data is not sold to third parties.
+        Data is retained solely for continuity, memory retrieval,
+        lawful reflection, and PMEi functionality.
+        </p>
+
+        <p>
+        Users should not store passwords, payment information,
+        government identifiers, or sensitive credentials in memory records.
+        </p>
+
+        <p>
+        Service: Dave Runner – PMEi Lawful Reflection Bridge
+        </p>
+    </body>
+    </html>
+    """
 @app.route("/status")
 def status():
     try:
