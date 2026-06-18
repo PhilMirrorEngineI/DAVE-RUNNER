@@ -887,6 +887,157 @@ def continuity_latest():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
+
+# ────────────── Global Memory Search ──────────────
+@app.route("/memory/search", methods=["POST"])
+def memory_search():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    d, err = get_json()
+    if err:
+        return err
+
+    user = owner_user_id()
+    query = (d.get("query") or "").strip()
+    limit = min(max(int(d.get("limit") or 20), 1), 100)
+
+    if not query:
+        return fail("query required", 400)
+
+    pattern = f"%{query}%"
+
+    try:
+        reflection_items = []
+        continuity_items = []
+
+        with get_db() as conn, conn.cursor() as cur:
+            # Search legacy reflection text records.
+            cur.execute("""
+                SELECT id, thread_id, session_id, content, drift_score, seal, ts
+                FROM reflections
+                WHERE user_id=%s
+                  AND (
+                    content ILIKE %s
+                    OR thread_id ILIKE %s
+                    OR session_id ILIKE %s
+                    OR seal ILIKE %s
+                  )
+                ORDER BY ts DESC
+                LIMIT %s;
+            """, (user, pattern, pattern, pattern, pattern, limit))
+            reflection_rows = cur.fetchall()
+
+            reflection_items = [{
+                "type": "reflection",
+                "id": r[0],
+                "thread_id": r[1],
+                "session_id": r[2],
+                "content": r[3],
+                "drift_score": r[4],
+                "seal": r[5],
+                "timestamp": str(r[6])
+            } for r in reflection_rows]
+
+            # Search structured continuity + human brief + learning layer.
+            cur.execute("""
+                SELECT id, save_id, session_ref, timestamp, drift_score,
+                       human_title, human_summary, decision_made, why_it_matters,
+                       next_steps, chat_recall,
+                       goal_state, active_constraints, key_insights, open_threads,
+                       context_shard, anchor_points, last_stable_state,
+                       learning_events, successful_patterns, failed_patterns,
+                       capability_scores, adaptation_notes, recommended_actions,
+                       seal
+                FROM continuity_records
+                WHERE user_id=%s
+                  AND (
+                    save_id ILIKE %s
+                    OR session_ref ILIKE %s
+                    OR COALESCE(human_title, '') ILIKE %s
+                    OR COALESCE(human_summary, '') ILIKE %s
+                    OR COALESCE(decision_made, '') ILIKE %s
+                    OR COALESCE(why_it_matters, '') ILIKE %s
+                    OR COALESCE(goal_state, '') ILIKE %s
+                    OR COALESCE(context_shard, '') ILIKE %s
+                    OR COALESCE(last_stable_state, '') ILIKE %s
+                    OR COALESCE(adaptation_notes, '') ILIKE %s
+                    OR COALESCE(next_steps::text, '') ILIKE %s
+                    OR COALESCE(chat_recall::text, '') ILIKE %s
+                    OR COALESCE(active_constraints::text, '') ILIKE %s
+                    OR COALESCE(key_insights::text, '') ILIKE %s
+                    OR COALESCE(open_threads::text, '') ILIKE %s
+                    OR COALESCE(anchor_points::text, '') ILIKE %s
+                    OR COALESCE(learning_events::text, '') ILIKE %s
+                    OR COALESCE(successful_patterns::text, '') ILIKE %s
+                    OR COALESCE(failed_patterns::text, '') ILIKE %s
+                    OR COALESCE(capability_scores::text, '') ILIKE %s
+                    OR COALESCE(recommended_actions::text, '') ILIKE %s
+                    OR seal ILIKE %s
+                  )
+                ORDER BY timestamp DESC
+                LIMIT %s;
+            """, (
+                user,
+                pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
+                pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
+                pattern, pattern, limit
+            ))
+            continuity_rows = cur.fetchall()
+
+            continuity_items = [{
+                "type": "continuity",
+                "id": r[0],
+                "save_id": r[1],
+                "session_ref": r[2],
+                "timestamp": str(r[3]),
+                "drift_score": r[4],
+                "human_brief": {
+                    "title": r[5],
+                    "summary": r[6],
+                    "decision_made": r[7],
+                    "why_it_matters": r[8],
+                    "next_steps": r[9],
+                    "chat_recall": r[10]
+                },
+                "goal_state": r[11],
+                "active_constraints": r[12],
+                "key_insights": r[13],
+                "open_threads": r[14],
+                "context_shard": r[15],
+                "anchor_points": r[16],
+                "last_stable_state": r[17],
+                "learning_layer": {
+                    "learning_events": r[18],
+                    "successful_patterns": r[19],
+                    "failed_patterns": r[20],
+                    "capability_scores": r[21],
+                    "adaptation_notes": r[22],
+                    "recommended_actions": r[23]
+                },
+                "seal": r[24]
+            } for r in continuity_rows]
+
+        combined = sorted(
+            reflection_items + continuity_items,
+            key=lambda item: item.get("timestamp") or "",
+            reverse=True
+        )[:limit]
+
+        return ok({
+            "query": query,
+            "user_id": user,
+            "count": len(combined),
+            "reflection_count": len(reflection_items),
+            "continuity_count": len(continuity_items),
+            "items": combined
+        })
+
+    except Exception as e:
+        return fail(f"Database error: {e}", 500)
+
+
 # ────────────── Keepalive ──────────────
 def keepalive():
     if not SELF_HEALTH_URL:
