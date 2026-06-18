@@ -143,6 +143,15 @@ def init_db():
               session_ref TEXT NOT NULL,
               drift_score REAL DEFAULT 0.0,
 
+              -- Human-readable continuity layer
+              human_title TEXT,
+              human_summary TEXT,
+              decision_made TEXT,
+              why_it_matters TEXT,
+              next_steps JSONB DEFAULT '[]'::jsonb,
+              chat_recall JSONB DEFAULT '[]'::jsonb,
+
+              -- Machine-readable continuity layer
               goal_state TEXT,
               active_constraints JSONB DEFAULT '[]'::jsonb,
               key_insights JSONB DEFAULT '[]'::jsonb,
@@ -155,6 +164,27 @@ def init_db():
               seal TEXT DEFAULT 'lawful'
             );
         """)
+
+        # Human-readable continuity layer migration for existing deployments.
+        for col, ddl in [
+            ("human_title", "TEXT"),
+            ("human_summary", "TEXT"),
+            ("decision_made", "TEXT"),
+            ("why_it_matters", "TEXT"),
+            ("next_steps", "JSONB DEFAULT '[]'::jsonb"),
+            ("chat_recall", "JSONB DEFAULT '[]'::jsonb")
+        ]:
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'continuity_records' AND column_name = '{col}'
+                    ) THEN
+                        ALTER TABLE continuity_records ADD COLUMN {col} {ddl};
+                    END IF;
+                END$$;
+            """)
 
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_continuity_user_session_ts
@@ -620,6 +650,16 @@ def continuity_save():
     drift = float(d.get("drift_score") or 0.0)
     seal = (d.get("seal") or "lawful").strip()
 
+    # Human-readable continuity layer.
+    # These fields make each save understandable months later without needing
+    # to reconstruct meaning from machine-state fields alone.
+    human_title = (d.get("human_title") or "").strip()
+    human_summary = (d.get("human_summary") or "").strip()
+    decision_made = (d.get("decision_made") or "").strip()
+    why_it_matters = (d.get("why_it_matters") or "").strip()
+    next_steps = as_json_list(d.get("next_steps"))
+    chat_recall = as_json_list(d.get("chat_recall"))
+
     goal_state = (d.get("goal_state") or "").strip()
     context_shard = (d.get("context_shard") or "").strip()
     last_stable_state = (d.get("last_stable_state") or "").strip() or None
@@ -631,8 +671,12 @@ def continuity_save():
 
     timestamp = d.get("timestamp")  # Optional ISO timestamp. If missing, DB NOW() is used.
 
-    if not goal_state and not context_shard and not anchor_points:
-        return fail("At least one of goal_state, context_shard, or anchor_points is required", 400)
+    if not any([goal_state, context_shard, anchor_points, human_title, human_summary, decision_made, why_it_matters]):
+        return fail(
+            "At least one continuity field is required "
+            "(goal_state, context_shard, anchor_points, human_title, human_summary, decision_made, or why_it_matters)",
+            400
+        )
 
     try:
         with get_db() as conn, conn.cursor() as cur:
@@ -640,13 +684,17 @@ def continuity_save():
                 cur.execute("""
                     INSERT INTO continuity_records (
                         save_id, user_id, timestamp, session_ref, drift_score,
+                        human_title, human_summary, decision_made, why_it_matters,
+                        next_steps, chat_recall,
                         goal_state, active_constraints, key_insights, open_threads,
                         context_shard, anchor_points, last_stable_state, seal
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id, timestamp;
                 """, (
                     save_id, user, timestamp, session_ref, drift,
+                    human_title, human_summary, decision_made, why_it_matters,
+                    Jsonb(next_steps), Jsonb(chat_recall),
                     goal_state, Jsonb(active_constraints), Jsonb(key_insights), Jsonb(open_threads),
                     context_shard, Jsonb(anchor_points), last_stable_state, seal
                 ))
@@ -654,13 +702,17 @@ def continuity_save():
                 cur.execute("""
                     INSERT INTO continuity_records (
                         save_id, user_id, session_ref, drift_score,
+                        human_title, human_summary, decision_made, why_it_matters,
+                        next_steps, chat_recall,
                         goal_state, active_constraints, key_insights, open_threads,
                         context_shard, anchor_points, last_stable_state, seal
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id, timestamp;
                 """, (
                     save_id, user, session_ref, drift,
+                    human_title, human_summary, decision_made, why_it_matters,
+                    Jsonb(next_steps), Jsonb(chat_recall),
                     goal_state, Jsonb(active_constraints), Jsonb(key_insights), Jsonb(open_threads),
                     context_shard, Jsonb(anchor_points), last_stable_state, seal
                 ))
@@ -676,7 +728,15 @@ def continuity_save():
             "drift_score": drift,
             "seal": seal,
             "timestamp": str(ts),
-            "last_stable_state": last_stable_state
+            "last_stable_state": last_stable_state,
+            "human_brief": {
+                "title": human_title,
+                "summary": human_summary,
+                "decision_made": decision_made,
+                "why_it_matters": why_it_matters,
+                "next_steps": next_steps,
+                "chat_recall": chat_recall
+            }
         })
 
     except psycopg.errors.UniqueViolation:
@@ -705,6 +765,8 @@ def continuity_get():
             if save_id:
                 cur.execute("""
                     SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+                           human_title, human_summary, decision_made, why_it_matters,
+                           next_steps, chat_recall,
                            goal_state, active_constraints, key_insights, open_threads,
                            context_shard, anchor_points, last_stable_state, seal
                     FROM continuity_records
@@ -714,6 +776,8 @@ def continuity_get():
             elif session_ref:
                 cur.execute("""
                     SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+                           human_title, human_summary, decision_made, why_it_matters,
+                           next_steps, chat_recall,
                            goal_state, active_constraints, key_insights, open_threads,
                            context_shard, anchor_points, last_stable_state, seal
                     FROM continuity_records
@@ -724,6 +788,8 @@ def continuity_get():
             else:
                 cur.execute("""
                     SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+                           human_title, human_summary, decision_made, why_it_matters,
+                           next_steps, chat_recall,
                            goal_state, active_constraints, key_insights, open_threads,
                            context_shard, anchor_points, last_stable_state, seal
                     FROM continuity_records
@@ -741,14 +807,22 @@ def continuity_get():
             "timestamp": str(r[3]),
             "session_ref": r[4],
             "drift_score": r[5],
-            "goal_state": r[6],
-            "active_constraints": r[7],
-            "key_insights": r[8],
-            "open_threads": r[9],
-            "context_shard": r[10],
-            "anchor_points": r[11],
-            "last_stable_state": r[12],
-            "seal": r[13]
+            "human_brief": {
+                "title": r[6],
+                "summary": r[7],
+                "decision_made": r[8],
+                "why_it_matters": r[9],
+                "next_steps": r[10],
+                "chat_recall": r[11]
+            },
+            "goal_state": r[12],
+            "active_constraints": r[13],
+            "key_insights": r[14],
+            "open_threads": r[15],
+            "context_shard": r[16],
+            "anchor_points": r[17],
+            "last_stable_state": r[18],
+            "seal": r[19]
         } for r in rows]
 
         return ok({"count": len(items), "items": items})
@@ -793,14 +867,22 @@ def continuity_latest():
             "timestamp": str(row[3]),
             "session_ref": row[4],
             "drift_score": row[5],
-            "goal_state": row[6],
-            "active_constraints": row[7],
-            "key_insights": row[8],
-            "open_threads": row[9],
-            "context_shard": row[10],
-            "anchor_points": row[11],
-            "last_stable_state": row[12],
-            "seal": row[13]
+            "human_brief": {
+                "title": row[6],
+                "summary": row[7],
+                "decision_made": row[8],
+                "why_it_matters": row[9],
+                "next_steps": row[10],
+                "chat_recall": row[11]
+            },
+            "goal_state": row[12],
+            "active_constraints": row[13],
+            "key_insights": row[14],
+            "open_threads": row[15],
+            "context_shard": row[16],
+            "anchor_points": row[17],
+            "last_stable_state": row[18],
+            "seal": row[19]
         }
 
         return ok(item)
