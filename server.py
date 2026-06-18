@@ -1,4 +1,48 @@
-# ──────────────────────────────────────────────
+# PMEi / Dave Runner Development Rules
+
+Always work in FULL FILE MODE.
+
+When editing code, schemas, APIs, database models, OpenAPI files, server routes, or configuration:
+- Return complete replacement files only.
+- Do not give snippets, patches, partial functions, or “insert this here” instructions unless explicitly requested.
+- Preserve existing functionality unless asked to remove it.
+- Increment version numbers clearly.
+- Keep server.py and OpenAPI schema aligned.
+- If adding a route to server.py, also add the matching OpenAPI Action.
+- If adding a schema field, ensure it is:
+  1. created/migrated in the database,
+  2. accepted in save routes,
+  3. returned in get/latest routes,
+  4. exposed in OpenAPI.
+- Prefer Postgres JSONB for lists, patterns, learning events, scores, and structured state.
+- Maintain API-key protection on all memory routes using X-API-KEY.
+- Never trust caller-supplied user_id; use server-side OWNER_USER_ID.
+- Keep /health and /privacy public.
+- Avoid exposing secrets in code.
+- Use Render environment variables for secrets.
+- Include pagination on large export/search/report endpoints.
+- Avoid response-too-large failures by returning summaries, counts, limits, and offsets.
+
+PMEi continuity model:
+- Reflections store legacy/raw continuity.
+- Continuity records store structured state.
+- Human brief fields preserve readable memory.
+- Learning fields preserve adaptive evidence.
+- Search/export/report endpoints should scan owner-owned data only.
+
+Learning layer fields:
+- learning_events
+- successful_patterns
+- failed_patterns
+- capability_scores
+- adaptation_notes
+- recommended_actions
+
+When uncertain:
+- Do not guess silently.
+- Preserve backward compatibility.
+- Prefer safe additive migrations over destructive changes.
+- Return a short changelog plus the complete files.──────────────────────────────────────────────
 # server.py — Dave Runner (PMEi Lawful Reflection Bridge, Postgres Edition)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
