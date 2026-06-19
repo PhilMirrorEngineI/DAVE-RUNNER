@@ -651,6 +651,23 @@ def continuity_latest():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 # ────────────── Structured Continuity Synthesis ──────────────
+I found the issue in the code you pasted.
+
+Your SQL block indentation is broken here:
+
+with get_db() as conn, conn.cursor() as cur:
+           cur.execute("""
+    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+
+and then later:
+
+""", (user, session_ref, limit))
+            rows = cur.fetchall()
+
+The indentation levels don't match. Python sees rows = cur.fetchall() as being in a different block than cur.execute().
+
+Replace your entire continuity_synthesize() function with this exact version:
+
 @app.route("/memory/continuity/synthesize", methods=["POST"])
 def continuity_synthesize():
     auth_err = require_memory_auth()
@@ -667,17 +684,21 @@ def continuity_synthesize():
 
     try:
         with get_db() as conn, conn.cursor() as cur:
-           cur.execute("""
-    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-           human_title, human_summary, decision_made, why_it_matters,
-           next_steps, chat_recall,
-           goal_state, active_constraints, key_insights, open_threads,
-           context_shard, anchor_points, last_stable_state, seal
-    FROM continuity_records
-    WHERE user_id=%s AND session_ref=%s
-    ORDER BY timestamp DESC
-    LIMIT %s;
-""", (user, session_ref, limit))
+            cur.execute("""
+                SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+                       human_title, human_summary, decision_made, why_it_matters,
+                       next_steps, chat_recall,
+                       goal_state, active_constraints, key_insights, open_threads,
+                       context_shard, anchor_points, last_stable_state,
+                       learning_events, successful_patterns, failed_patterns,
+                       capability_scores, adaptation_notes, recommended_actions,
+                       seal
+                FROM continuity_records
+                WHERE user_id=%s AND session_ref=%s
+                ORDER BY timestamp DESC
+                LIMIT %s;
+            """, (user, session_ref, limit))
+
             rows = cur.fetchall()
 
         if len(rows) < 2:
@@ -690,13 +711,14 @@ def continuity_synthesize():
             "source_record_count": len(items),
             "source_save_ids": [item.get("save_id") for item in items],
             "human_title": "Continuity Synthesis",
-            "human_summary": "Retrieved multiple continuity records for synthesis. Full automated synthesis logic is not yet implemented, but records were successfully gathered for comparison.",
-            "decision_made": "Synthesis endpoint route is now active.",
-            "why_it_matters": "This confirms Claude/Grok/MCP can reach the backend synthesis pathway instead of receiving 404.",
+            "human_summary": "Retrieved multiple continuity records for synthesis.",
+            "decision_made": "Synthesis endpoint route is active.",
+            "why_it_matters": "Confirms Claude/Grok/MCP can reach the synthesis backend.",
             "next_steps": [
-                "Add OpenAI or local model synthesis logic",
-                "Save generated synthesis as a new continuity record",
-                "Populate learning_layer fields"
+                "Add OpenAI synthesis",
+                "Add local-model synthesis",
+                "Save synthesis as continuity record",
+                "Populate learning layer automatically"
             ],
             "records": items
         })
