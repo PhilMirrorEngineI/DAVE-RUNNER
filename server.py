@@ -651,23 +651,6 @@ def continuity_latest():
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 # ────────────── Structured Continuity Synthesis ──────────────
-I found the issue in the code you pasted.
-
-Your SQL block indentation is broken here:
-
-with get_db() as conn, conn.cursor() as cur:
-           cur.execute("""
-    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
-
-and then later:
-
-""", (user, session_ref, limit))
-            rows = cur.fetchall()
-
-The indentation levels don't match. Python sees rows = cur.fetchall() as being in a different block than cur.execute().
-
-Replace your entire continuity_synthesize() function with this exact version:
-
 @app.route("/memory/continuity/synthesize", methods=["POST"])
 def continuity_synthesize():
     auth_err = require_memory_auth()
