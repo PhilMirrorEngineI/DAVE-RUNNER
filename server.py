@@ -667,10 +667,17 @@ def continuity_synthesize():
 
     try:
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute(
-                SELECT + " WHERE user_id=%s AND session_ref=%s ORDER BY timestamp DESC LIMIT %s;",
-                (user, session_ref, limit)
-            )
+           cur.execute("""
+    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+           human_title, human_summary, decision_made, why_it_matters,
+           next_steps, chat_recall,
+           goal_state, active_constraints, key_insights, open_threads,
+           context_shard, anchor_points, last_stable_state, seal
+    FROM continuity_records
+    WHERE user_id=%s AND session_ref=%s
+    ORDER BY timestamp DESC
+    LIMIT %s;
+""", (user, session_ref, limit))
             rows = cur.fetchall()
 
         if len(rows) < 2:
