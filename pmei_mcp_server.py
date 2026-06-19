@@ -157,10 +157,4 @@ def synthesize_continuity(
 
 
 if __name__ == "__main__":
-    import os
-
-    port = os.getenv("PORT", "10000")
-    os.environ["FASTMCP_HOST"] = "0.0.0.0"
-    os.environ["FASTMCP_PORT"] = port
-
-mcp.run(transport="http")
+    mcp.run(transport="sse")
