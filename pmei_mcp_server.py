@@ -163,4 +163,4 @@ if __name__ == "__main__":
     os.environ["FASTMCP_HOST"] = "0.0.0.0"
     os.environ["FASTMCP_PORT"] = port
 
-    mcp.run(transport="streamable-http")
+mcp.run(transport="http")
