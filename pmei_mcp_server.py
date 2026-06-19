@@ -2,7 +2,7 @@ import os
 from typing import Any, Dict, Optional
 
 import requests
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 DAVE_RUNNER_URL = os.getenv("DAVE_RUNNER_URL", "https://dave-runner.onrender.com").rstrip("/")
 DAVE_RUNNER_API_KEY = os.getenv("DAVE_RUNNER_API_KEY", "").strip()
@@ -159,8 +159,10 @@ def synthesize_continuity(
 if __name__ == "__main__":
     import os
 
-    port = os.getenv("PORT", "10000")
-    os.environ["FASTMCP_HOST"] = "0.0.0.0"
-    os.environ["FASTMCP_PORT"] = port
+    port = int(os.getenv("PORT", "10000"))
 
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="http",
+        host="0.0.0.0",
+        port=port
+    )
