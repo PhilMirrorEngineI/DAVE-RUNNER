@@ -650,7 +650,52 @@ def continuity_latest():
         return ok(continuity_row_to_item(row))
     except Exception as e:
         return fail(f"Database error: {e}", 500)
+# ────────────── Structured Continuity Synthesis ──────────────
+@app.route("/memory/continuity/synthesize", methods=["POST"])
+def continuity_synthesize():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
 
+    d, err = get_json()
+    if err:
+        return err
+
+    user = owner_user_id()
+    session_ref = (d.get("session_ref") or d.get("thread_id") or "continuity_tests").strip()
+    limit = min(max(int(d.get("limit") or 20), 2), 100)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                SELECT + " WHERE user_id=%s AND session_ref=%s ORDER BY timestamp DESC LIMIT %s;",
+                (user, session_ref, limit)
+            )
+            rows = cur.fetchall()
+
+        if len(rows) < 2:
+            return fail("At least two continuity records are required for synthesis", 400)
+
+        items = [continuity_row_to_item(row) for row in rows]
+
+        return ok({
+            "session_ref": session_ref,
+            "source_record_count": len(items),
+            "source_save_ids": [item.get("save_id") for item in items],
+            "human_title": "Continuity Synthesis",
+            "human_summary": "Retrieved multiple continuity records for synthesis. Full automated synthesis logic is not yet implemented, but records were successfully gathered for comparison.",
+            "decision_made": "Synthesis endpoint route is now active.",
+            "why_it_matters": "This confirms Claude/Grok/MCP can reach the backend synthesis pathway instead of receiving 404.",
+            "next_steps": [
+                "Add OpenAI or local model synthesis logic",
+                "Save generated synthesis as a new continuity record",
+                "Populate learning_layer fields"
+            ],
+            "records": items
+        })
+
+    except Exception as e:
+        return fail(f"Synthesis error: {e}", 500)
 @app.route("/memory/search", methods=["POST"])
 def memory_search():
     auth_err = require_memory_auth()
