@@ -1,5 +1,49 @@
-# ──────────────────────────────────────────────
-# server.py — Dave Runner v2.2.3 (PMEi Lawful Reflection Bridge, Postgres Edition)
+# PMEi / Dave Runner Development Rules
+
+Always work in FULL FILE MODE.
+
+When editing code, schemas, APIs, database models, OpenAPI files, server routes, or configuration:
+- Return complete replacement files only.
+- Do not give snippets, patches, partial functions, or “insert this here” instructions unless explicitly requested.
+- Preserve existing functionality unless asked to remove it.
+- Increment version numbers clearly.
+- Keep server.py and OpenAPI schema aligned.
+- If adding a route to server.py, also add the matching OpenAPI Action.
+- If adding a schema field, ensure it is:
+  1. created/migrated in the database,
+  2. accepted in save routes,
+  3. returned in get/latest routes,
+  4. exposed in OpenAPI.
+- Prefer Postgres JSONB for lists, patterns, learning events, scores, and structured state.
+- Maintain API-key protection on all memory routes using X-API-KEY.
+- Never trust caller-supplied user_id; use server-side OWNER_USER_ID.
+- Keep /health and /privacy public.
+- Avoid exposing secrets in code.
+- Use Render environment variables for secrets.
+- Include pagination on large export/search/report endpoints.
+- Avoid response-too-large failures by returning summaries, counts, limits, and offsets.
+
+PMEi continuity model:
+- Reflections store legacy/raw continuity.
+- Continuity records store structured state.
+- Human brief fields preserve readable memory.
+- Learning fields preserve adaptive evidence.
+- Search/export/report endpoints should scan owner-owned data only.
+
+Learning layer fields:
+- learning_events
+- successful_patterns
+- failed_patterns
+- capability_scores
+- adaptation_notes
+- recommended_actions
+
+When uncertain:
+- Do not guess silently.
+- Preserve backward compatibility.
+- Prefer safe additive migrations over destructive changes.
+- Return a short changelog plus the complete files.──────────────────────────────────────────────
+# server.py — Dave Runner (PMEi Lawful Reflection Bridge, Postgres Edition)
 # gunicorn -w 1 -k gthread -t 120 -b 0.0.0.0:$PORT server:app
 # ──────────────────────────────────────────────
 import os, time, threading, uuid
@@ -48,17 +92,13 @@ def fail(msg, code=400, **extra):
     return jsonify(r), code
 
 def get_json():
-    """
-    Safe JSON helper.
-    Empty or missing JSON bodies are treated as {} so optional request bodies work.
-    """
     try:
-        d = request.get_json(silent=True) or {}
+        d = request.get_json(force=True) or {}
         if not isinstance(d, dict):
             raise ValueError
         return d, None
     except Exception:
-        return None, fail("Invalid JSON body; expected an object", 400)
+        return None, fail("Invalid or missing JSON body", 400)
 
 def get_db():
     return psycopg.connect(DATABASE_URL)
@@ -223,11 +263,11 @@ init_db()
 def root():
     return ok({
         "service": "Dave Runner — PMEi Lawful Reflection Bridge",
-        "version": "2.2.3",
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(openai_client),
-        "db_configured": bool(DATABASE_URL),
-        "auth_configured": bool(DAVE_RUNNER_API_KEY)
+        "db_connected": bool(DATABASE_URL),
+        "auth_configured": bool(DAVE_RUNNER_API_KEY),
+        "owner_user_id": OWNER_USER_ID
     })
 
 @app.route("/health")
@@ -269,15 +309,11 @@ def privacy():
 
 @app.route("/status")
 def status():
-    auth_err = require_memory_auth()
-    if auth_err:
-        return auth_err
-
     try:
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*), AVG(drift_score) FROM reflections WHERE user_id=%s;", (owner_user_id(),))
+            cur.execute("SELECT COUNT(*), AVG(drift_score) FROM reflections;")
             reflection_count, reflection_avg = cur.fetchone()
-            cur.execute("SELECT COUNT(*), AVG(drift_score) FROM continuity_records WHERE user_id=%s;", (owner_user_id(),))
+            cur.execute("SELECT COUNT(*), AVG(drift_score) FROM continuity_records;")
             continuity_count, continuity_avg = cur.fetchone()
     except Exception:
         reflection_count, reflection_avg = 0, None
@@ -455,36 +491,35 @@ def memory_scan():
     if auth_err:
         return auth_err
 
-    d, err = get_json(required=False)
+    d, err = get_json()
     if err:
         return err
 
     user = owner_user_id()
     include_summary = bool(d.get("summary", True))
-    limit = min(max(int(d.get("limit") or 50), 1), 200)
-    offset = max(int(d.get("offset") or 0), 0)
+    PHIL_THREAD_ALIASES = [
+        "continuity", "builder", "harpers", "reflection",
+        "pmei", "ethics", "validation", "diary", "summary"
+    ]
 
     try:
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*) FROM (
-                    SELECT session_id, thread_id
-                    FROM reflections
-                    WHERE user_id = %s
-                    GROUP BY session_id, thread_id
-                ) grouped;
-            """, (user,))
-            total_sessions = int(cur.fetchone()[0] or 0)
+            alias_conditions = []
+            alias_params = []
+            for alias in PHIL_THREAD_ALIASES:
+                alias_conditions.append("thread_id ILIKE %s")
+                alias_params.append(f"%{alias}%")
+            thread_filter = " OR ".join(alias_conditions)
 
-            cur.execute("""
+            query = f"""
                 SELECT session_id, thread_id, COUNT(*), ROUND(AVG(drift_score)::numeric,4),
                        MIN(ts), MAX(ts)
                 FROM reflections
-                WHERE user_id = %s
+                WHERE user_id = %s OR ({thread_filter})
                 GROUP BY session_id, thread_id
-                ORDER BY MAX(ts) DESC
-                LIMIT %s OFFSET %s;
-            """, (user, limit, offset))
+                ORDER BY MAX(ts) DESC;
+            """
+            cur.execute(query, [user] + alias_params)
             rows = cur.fetchall()
 
         sessions = [{
@@ -496,14 +531,7 @@ def memory_scan():
             "last_ts": str(r[5])
         } for r in rows]
 
-        result = {
-            "user_id": user,
-            "total_sessions": total_sessions,
-            "session_count": len(sessions),
-            "limit": limit,
-            "offset": offset,
-            "sessions": sessions
-        }
+        result = {"user_id": user, "session_count": len(sessions), "sessions": sessions}
 
         if include_summary and openai_client and sessions:
             context_lines = [
@@ -511,8 +539,8 @@ def memory_scan():
                 for s in sessions
             ]
             system_prompt = (
-                "You are PMEi lawful continuity synthesis. Summarize the authenticated user's "
-                "owner-scoped reflection landscape, noting drift stability and thread coherence."
+                "You are PMEi lawful continuity synthesis. Summarize the user's reflection landscape "
+                "across all Phil variants, noting drift stability and thread coherence."
             )
             resp = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -526,7 +554,6 @@ def memory_scan():
             result["summary"] = resp.choices[0].message.content.strip()
 
         return ok(result)
-
     except Exception as e:
         return fail(f"Database error: {e}", 500)
 
@@ -537,7 +564,7 @@ def memory_context_scan():
     if auth_err:
         return auth_err
 
-    d, err = get_json(required=False)
+    d, err = get_json()
     if err:
         return err
 
@@ -545,9 +572,11 @@ def memory_context_scan():
     thread = (d.get("thread_id") or "general").strip()
     session_id = (d.get("session_id") or "continuity").strip()
     limit = min(max(int(d.get("limit") or 20), 1), 200)
-    scan_limit = min(max(int(d.get("scan_limit") or 50), 1), 200)
-    offset = max(int(d.get("offset") or 0), 0)
     include_summary = bool(d.get("summary", True))
+    PHIL_THREAD_ALIASES = [
+        "continuity", "builder", "harpers", "reflection",
+        "pmei", "ethics", "validation", "diary", "summary"
+    ]
     context_result, scan_result = {}, {}
 
     try:
@@ -563,8 +592,8 @@ def memory_context_scan():
             if reflections:
                 joined_context = "\n".join(reflections)
                 system_prompt = (
-                    "You are PMEi lawful continuity synthesis. Summarize this owner-scoped session’s "
-                    "reflections, highlighting lawful drift and continuity insights."
+                    "You are PMEi lawful continuity synthesis. Summarize this session’s reflections, "
+                    "highlighting lawful drift and continuity insights."
                 )
                 resp = openai_client.chat.completions.create(
                     model=OPENAI_MODEL,
@@ -577,41 +606,30 @@ def memory_context_scan():
                 )
                 context_result = {
                     "session_id": session_id,
-                    "thread_id": thread,
                     "summary": resp.choices[0].message.content if resp and resp.choices else "",
                     "reflection_count": len(reflections)
-                }
-            else:
-                context_result = {
-                    "session_id": session_id,
-                    "thread_id": thread,
-                    "summary": "",
-                    "reflection_count": 0
                 }
     except Exception as e:
         context_result = {"error": str(e)}
 
     try:
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*) FROM (
-                    SELECT session_id, thread_id
-                    FROM reflections
-                    WHERE user_id = %s
-                    GROUP BY session_id, thread_id
-                ) grouped;
-            """, (user,))
-            total_sessions = int(cur.fetchone()[0] or 0)
+            alias_conditions = []
+            alias_params = []
+            for alias in PHIL_THREAD_ALIASES:
+                alias_conditions.append("thread_id ILIKE %s")
+                alias_params.append(f"%{alias}%")
+            thread_filter = " OR ".join(alias_conditions)
 
-            cur.execute("""
+            query = f"""
                 SELECT session_id, thread_id, COUNT(*), ROUND(AVG(drift_score)::numeric,4),
                        MIN(ts), MAX(ts)
                 FROM reflections
-                WHERE user_id = %s
+                WHERE user_id = %s OR ({thread_filter})
                 GROUP BY session_id, thread_id
-                ORDER BY MAX(ts) DESC
-                LIMIT %s OFFSET %s;
-            """, (user, scan_limit, offset))
+                ORDER BY MAX(ts) DESC;
+            """
+            cur.execute(query, [user] + alias_params)
             rows = cur.fetchall()
 
         sessions = [{
@@ -623,14 +641,7 @@ def memory_context_scan():
             "last_ts": str(r[5])
         } for r in rows]
 
-        scan_result = {
-            "user_id": user,
-            "total_sessions": total_sessions,
-            "session_count": len(sessions),
-            "limit": scan_limit,
-            "offset": offset,
-            "sessions": sessions
-        }
+        scan_result = {"user_id": user, "session_count": len(sessions), "sessions": sessions}
 
         if include_summary and openai_client and sessions:
             context_lines = [
@@ -639,7 +650,7 @@ def memory_context_scan():
             ]
             system_prompt = (
                 "You are PMEi lawful continuity synthesis. Provide an integrated narrative summary "
-                "for the authenticated owner-scoped threads only."
+                "combining all Phil variants and threads into one continuity overview."
             )
             resp = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -651,11 +662,56 @@ def memory_context_scan():
                 max_tokens=400
             )
             scan_result["summary"] = resp.choices[0].message.content.strip()
-
     except Exception as e:
         scan_result = {"error": str(e)}
 
     return ok({"context_result": context_result, "scan_result": scan_result})
+
+CONTINUITY_SELECT = """
+    SELECT id, save_id, user_id, timestamp, session_ref, drift_score,
+           human_title, human_summary, decision_made, why_it_matters,
+           next_steps, chat_recall,
+           goal_state, active_constraints, key_insights, open_threads,
+           context_shard, anchor_points, last_stable_state,
+           learning_events, successful_patterns, failed_patterns,
+           capability_scores, adaptation_notes, recommended_actions,
+           seal
+    FROM continuity_records
+"""
+
+def continuity_row_to_item(r):
+    return {
+        "id": r[0],
+        "save_id": r[1],
+        "user_id": r[2],
+        "timestamp": str(r[3]),
+        "session_ref": r[4],
+        "drift_score": r[5],
+        "human_brief": {
+            "title": r[6],
+            "summary": r[7],
+            "decision_made": r[8],
+            "why_it_matters": r[9],
+            "next_steps": r[10],
+            "chat_recall": r[11]
+        },
+        "goal_state": r[12],
+        "active_constraints": r[13],
+        "key_insights": r[14],
+        "open_threads": r[15],
+        "context_shard": r[16],
+        "anchor_points": r[17],
+        "last_stable_state": r[18],
+        "learning_layer": {
+            "learning_events": r[19],
+            "successful_patterns": r[20],
+            "failed_patterns": r[21],
+            "capability_scores": r[22],
+            "adaptation_notes": r[23],
+            "recommended_actions": r[24]
+        },
+        "seal": r[25]
+    }
 
 # ────────────── Structured Continuity Save ──────────────
 @app.route("/memory/continuity/save", methods=["POST"])
@@ -808,7 +864,7 @@ def continuity_get():
     if auth_err:
         return auth_err
 
-    d, err = get_json(required=False)
+    d, err = get_json()
     if err:
         return err
 
@@ -890,39 +946,18 @@ def memory_search():
     user = owner_user_id()
     query = (d.get("query") or "").strip()
     limit = min(max(int(d.get("limit") or 20), 1), 100)
-    offset = max(int(d.get("offset") or 0), 0)
-    include_full = bool(d.get("include_full", False))
-    excerpt_chars = min(max(int(d.get("excerpt_chars") or 1200), 200), 4000)
 
     if not query:
         return fail("query required", 400)
 
     pattern = f"%{query}%"
 
-    def excerpt(value):
-        text = "" if value is None else str(value)
-        if include_full or len(text) <= excerpt_chars:
-            return text
-        return text[:excerpt_chars] + "…"
-
     try:
         reflection_items = []
         continuity_items = []
 
         with get_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM reflections
-                WHERE user_id=%s
-                  AND (
-                    content ILIKE %s
-                    OR thread_id ILIKE %s
-                    OR session_id ILIKE %s
-                    OR seal ILIKE %s
-                  );
-            """, (user, pattern, pattern, pattern, pattern))
-            reflection_total = int(cur.fetchone()[0] or 0)
-
+            # Search legacy reflection text records.
             cur.execute("""
                 SELECT id, thread_id, session_id, content, drift_score, seal, ts
                 FROM reflections
@@ -934,8 +969,8 @@ def memory_search():
                     OR seal ILIKE %s
                   )
                 ORDER BY ts DESC
-                LIMIT %s OFFSET %s;
-            """, (user, pattern, pattern, pattern, pattern, limit, offset))
+                LIMIT %s;
+            """, (user, pattern, pattern, pattern, pattern, limit))
             reflection_rows = cur.fetchall()
 
             reflection_items = [{
@@ -943,42 +978,13 @@ def memory_search():
                 "id": r[0],
                 "thread_id": r[1],
                 "session_id": r[2],
-                "content": excerpt(r[3]),
+                "content": r[3],
                 "drift_score": r[4],
                 "seal": r[5],
                 "timestamp": str(r[6])
             } for r in reflection_rows]
 
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM continuity_records
-                WHERE user_id=%s
-                  AND (
-                    save_id ILIKE %s
-                    OR session_ref ILIKE %s
-                    OR human_title ILIKE %s
-                    OR human_summary ILIKE %s
-                    OR decision_made ILIKE %s
-                    OR why_it_matters ILIKE %s
-                    OR goal_state ILIKE %s
-                    OR context_shard ILIKE %s
-                    OR adaptation_notes ILIKE %s
-                    OR active_constraints::text ILIKE %s
-                    OR key_insights::text ILIKE %s
-                    OR open_threads::text ILIKE %s
-                    OR anchor_points::text ILIKE %s
-                    OR learning_events::text ILIKE %s
-                    OR successful_patterns::text ILIKE %s
-                    OR failed_patterns::text ILIKE %s
-                    OR recommended_actions::text ILIKE %s
-                  );
-            """, (
-                user, pattern, pattern, pattern, pattern, pattern, pattern,
-                pattern, pattern, pattern, pattern, pattern, pattern, pattern,
-                pattern, pattern, pattern, pattern
-            ))
-            continuity_total = int(cur.fetchone()[0] or 0)
-
+            # Search structured continuity + human brief + learning layer.
             cur.execute("""
                 SELECT id, save_id, session_ref, timestamp, drift_score,
                        human_title, human_summary, decision_made, why_it_matters,
@@ -993,30 +999,36 @@ def memory_search():
                   AND (
                     save_id ILIKE %s
                     OR session_ref ILIKE %s
-                    OR human_title ILIKE %s
-                    OR human_summary ILIKE %s
-                    OR decision_made ILIKE %s
-                    OR why_it_matters ILIKE %s
-                    OR goal_state ILIKE %s
-                    OR context_shard ILIKE %s
-                    OR adaptation_notes ILIKE %s
-                    OR active_constraints::text ILIKE %s
-                    OR key_insights::text ILIKE %s
-                    OR open_threads::text ILIKE %s
-                    OR anchor_points::text ILIKE %s
-                    OR learning_events::text ILIKE %s
-                    OR successful_patterns::text ILIKE %s
-                    OR failed_patterns::text ILIKE %s
-                    OR recommended_actions::text ILIKE %s
+                    OR COALESCE(human_title, '') ILIKE %s
+                    OR COALESCE(human_summary, '') ILIKE %s
+                    OR COALESCE(decision_made, '') ILIKE %s
+                    OR COALESCE(why_it_matters, '') ILIKE %s
+                    OR COALESCE(goal_state, '') ILIKE %s
+                    OR COALESCE(context_shard, '') ILIKE %s
+                    OR COALESCE(last_stable_state, '') ILIKE %s
+                    OR COALESCE(adaptation_notes, '') ILIKE %s
+                    OR COALESCE(next_steps::text, '') ILIKE %s
+                    OR COALESCE(chat_recall::text, '') ILIKE %s
+                    OR COALESCE(active_constraints::text, '') ILIKE %s
+                    OR COALESCE(key_insights::text, '') ILIKE %s
+                    OR COALESCE(open_threads::text, '') ILIKE %s
+                    OR COALESCE(anchor_points::text, '') ILIKE %s
+                    OR COALESCE(learning_events::text, '') ILIKE %s
+                    OR COALESCE(successful_patterns::text, '') ILIKE %s
+                    OR COALESCE(failed_patterns::text, '') ILIKE %s
+                    OR COALESCE(capability_scores::text, '') ILIKE %s
+                    OR COALESCE(recommended_actions::text, '') ILIKE %s
+                    OR seal ILIKE %s
                   )
                 ORDER BY timestamp DESC
-                LIMIT %s OFFSET %s;
+                LIMIT %s;
             """, (
-                user, pattern, pattern, pattern, pattern, pattern, pattern,
-                pattern, pattern, pattern, pattern, pattern, pattern, pattern,
-                pattern, pattern, pattern, pattern, limit, offset
+                user,
+                pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
+                pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
+                pattern, pattern, limit
             ))
-            rows = cur.fetchall()
+            continuity_rows = cur.fetchall()
 
             continuity_items = [{
                 "type": "continuity",
@@ -1027,17 +1039,17 @@ def memory_search():
                 "drift_score": r[4],
                 "human_brief": {
                     "title": r[5],
-                    "summary": excerpt(r[6]),
-                    "decision_made": excerpt(r[7]),
-                    "why_it_matters": excerpt(r[8]),
+                    "summary": r[6],
+                    "decision_made": r[7],
+                    "why_it_matters": r[8],
                     "next_steps": r[9],
                     "chat_recall": r[10]
                 },
-                "goal_state": excerpt(r[11]),
+                "goal_state": r[11],
                 "active_constraints": r[12],
                 "key_insights": r[13],
                 "open_threads": r[14],
-                "context_shard": excerpt(r[15]),
+                "context_shard": r[15],
                 "anchor_points": r[16],
                 "last_stable_state": r[17],
                 "learning_layer": {
@@ -1045,30 +1057,30 @@ def memory_search():
                     "successful_patterns": r[19],
                     "failed_patterns": r[20],
                     "capability_scores": r[21],
-                    "adaptation_notes": excerpt(r[22]),
+                    "adaptation_notes": r[22],
                     "recommended_actions": r[23]
                 },
                 "seal": r[24]
-            } for r in rows]
+            } for r in continuity_rows]
 
-        items = reflection_items + continuity_items
-        items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        combined = sorted(
+            reflection_items + continuity_items,
+            key=lambda item: item.get("timestamp") or "",
+            reverse=True
+        )[:limit]
 
         return ok({
             "query": query,
-            "limit": limit,
-            "offset": offset,
-            "include_full": include_full,
+            "user_id": user,
+            "count": len(combined),
             "reflection_count": len(reflection_items),
             "continuity_count": len(continuity_items),
-            "reflection_total": reflection_total,
-            "continuity_total": continuity_total,
-            "count": len(items),
-            "items": items
+            "items": combined
         })
 
     except Exception as e:
         return fail(f"Database error: {e}", 500)
+
 
 # ────────────── Memory Export (protected, paginated full owner dump) ──────────────
 @app.route("/memory/export", methods=["POST"])
@@ -1077,7 +1089,7 @@ def memory_export():
     if auth_err:
         return auth_err
 
-    d, err = get_json(required=False)
+    d, err = get_json()
     if err:
         return err
 
@@ -1167,133 +1179,6 @@ def memory_export():
             "reflection_count": len(result.get("reflections", [])),
             "continuity_count": len(result.get("continuity_records", [])),
             "data": result
-        })
-
-    except Exception as e:
-        return fail(f"Database error: {e}", 500)
-
-
-
-# ────────────── Learning Report ──────────────
-@app.route("/memory/learning/report", methods=["POST"])
-def learning_report():
-    """
-    Compact adaptive learning report.
-    Scans structured continuity records for the authenticated owner and returns
-    only the learning layer, avoiding huge full-memory exports.
-    """
-    auth_err = require_memory_auth()
-    if auth_err:
-        return auth_err
-
-    d, err = get_json(required=False)
-    if err:
-        return err
-
-    user = owner_user_id()
-    limit = min(max(int(d.get("limit") or 100), 1), 1000)
-    offset = max(int(d.get("offset") or 0), 0)
-    include_recent_records = bool(d.get("include_recent_records", True))
-    recent_limit = min(max(int(d.get("recent_limit") or 10), 0), 50)
-
-    def add_unique(target, values):
-        if not values:
-            return
-        incoming = values if isinstance(values, list) else [values]
-        for item in incoming:
-            if item is None:
-                continue
-            key = item if isinstance(item, str) else str(item)
-            if key not in target["_seen"]:
-                target["_seen"].add(key)
-                target["items"].append(item)
-
-    def merge_scores(total, values):
-        if not isinstance(values, dict):
-            return
-        for k, v in values.items():
-            try:
-                score = float(v)
-            except Exception:
-                continue
-            bucket = total.setdefault(k, {"sum": 0.0, "count": 0, "latest": score})
-            bucket["sum"] += score
-            bucket["count"] += 1
-            bucket["latest"] = score
-
-    learning_events = {"items": [], "_seen": set()}
-    successful_patterns = {"items": [], "_seen": set()}
-    failed_patterns = {"items": [], "_seen": set()}
-    recommended_actions = {"items": [], "_seen": set()}
-    adaptation_notes = {"items": [], "_seen": set()}
-    capability_score_buckets = {}
-    recent_records = []
-
-    try:
-        with get_db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM continuity_records WHERE user_id=%s;", (user,))
-            total_records = int(cur.fetchone()[0] or 0)
-
-            cur.execute("""
-                SELECT save_id, timestamp, session_ref, drift_score,
-                       human_title, human_summary,
-                       learning_events, successful_patterns, failed_patterns,
-                       capability_scores, adaptation_notes, recommended_actions
-                FROM continuity_records
-                WHERE user_id=%s
-                ORDER BY timestamp DESC
-                LIMIT %s OFFSET %s;
-            """, (user, limit, offset))
-            rows = cur.fetchall()
-
-        for idx, r in enumerate(rows):
-            save_id, ts, session_ref, drift_score, human_title, human_summary, le, sp, fp, cs, notes, actions = r
-
-            add_unique(learning_events, le)
-            add_unique(successful_patterns, sp)
-            add_unique(failed_patterns, fp)
-            add_unique(recommended_actions, actions)
-            add_unique(adaptation_notes, notes)
-            merge_scores(capability_score_buckets, cs)
-
-            if include_recent_records and idx < recent_limit:
-                recent_records.append({
-                    "save_id": save_id,
-                    "timestamp": str(ts),
-                    "session_ref": session_ref,
-                    "drift_score": drift_score,
-                    "human_title": human_title,
-                    "human_summary": human_summary,
-                    "learning_events": le or [],
-                    "successful_patterns": sp or [],
-                    "failed_patterns": fp or [],
-                    "capability_scores": cs or {},
-                    "adaptation_notes": notes or "",
-                    "recommended_actions": actions or []
-                })
-
-        capability_scores = {
-            k: {
-                "average": round(v["sum"] / v["count"], 4) if v["count"] else 0.0,
-                "latest": v["latest"],
-                "samples": v["count"]
-            }
-            for k, v in capability_score_buckets.items()
-        }
-
-        return ok({
-            "user_id": user,
-            "total_records": total_records,
-            "records_scanned": len(rows),
-            "limit": limit,
-            "offset": offset,
-            "learning_events": learning_events["items"],
-            "successful_patterns": successful_patterns["items"],
-            "failed_patterns": failed_patterns["items"],
-            "capability_scores": capability_scores,
-            "adaptation_notes": adaptation_notes["items"],
-            "recommended_actions": recommended_actions["items"],
-            "recent_records": recent_records
         })
 
     except Exception as e:
