@@ -9,4 +9,4 @@ openai>=1.41.0
 flask-cors
 mcp
 requests
-fastmcp
+fastmcp==2.1.2
