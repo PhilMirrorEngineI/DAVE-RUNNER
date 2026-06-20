@@ -1065,7 +1065,9 @@ def benchmark_run():
         return fail("OpenAI not configured", 503)
 
     benchmark_id = (data.get("benchmark_id") or "BR-001-draft-state-recovery-benchmark").strip()
-    model = (data.get("model") or OPENAI_MODEL).strip()
+   model = (data.get("model") or OPENAI_MODEL).strip()
+if model == "default":
+    model = OPENAI_MODEL
     save_result = bool(data.get("save_result", True))
 
     continuity_packet = """
@@ -1115,10 +1117,18 @@ Return:
         )
         return response.choices[0].message.content.strip()
 
+   try:
     baseline_answer = ask_model([
         {"role": "system", "content": "Answer only from information provided in this chat. Do not invent missing project state."},
         {"role": "user", "content": final_question}
     ])
+
+    pmei_answer = ask_model([
+        {"role": "system", "content": "Use the provided PMEi continuity packet to reconstruct project state."},
+        {"role": "user", "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"}
+    ])
+except Exception as exc:
+    return fail(f"Benchmark model call error: {exc}", 500)
 
     pmei_answer = ask_model([
         {"role": "system", "content": "Use the provided PMEi continuity packet to reconstruct project state."},
