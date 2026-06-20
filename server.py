@@ -1051,7 +1051,27 @@ def memory_search():
     except Exception as exc:
         return fail(f"Database error: {exc}", 500)
 
-POST /memory/benchmark/run
+@app.route("/memory/benchmark/run", methods=["POST"])
+def benchmark_run():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    benchmark_id = (data.get("benchmark_id") or "").strip()
+    model = (data.get("model") or "default").strip()
+    save_result = bool(data.get("save_result", True))
+
+    return ok({
+        "benchmark_id": benchmark_id,
+        "model": model,
+        "save_result": save_result,
+        "status": "endpoint_created",
+        "message": "Benchmark runner placeholder active"
+    })
 
 @app.route("/memory/export", methods=["POST"])
 def memory_export():
