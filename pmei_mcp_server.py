@@ -155,6 +155,32 @@ def synthesize_continuity(
         "include_all_sessions": include_all_sessions
     })
 
-
+@mcp.tool()
+def keepalive() -> Dict[str, Any]:
+    """Keep the MCP bridge warm and verify Dave Runner is reachable."""
+    return call_dave("/health", None)
 if __name__ == "__main__":
+    import threading
+    import time
+
+    def background_keepalive():
+        self_url = os.getenv("SELF_HEALTH_URL", "").strip()
+        interval = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
+
+        if not self_url:
+            print("[MCP KEEPALIVE] disabled - SELF_HEALTH_URL not set")
+            return
+
+        print(f"[MCP KEEPALIVE] active - ping {self_url} every {interval}s")
+
+        while True:
+            try:
+                requests.get(self_url, timeout=10)
+                print("[MCP KEEPALIVE] ok")
+            except Exception as exc:
+                print(f"[MCP KEEPALIVE] error: {exc}")
+            time.sleep(interval)
+
+    threading.Thread(target=background_keepalive, daemon=True).start()
+
     mcp.run(transport="sse")
