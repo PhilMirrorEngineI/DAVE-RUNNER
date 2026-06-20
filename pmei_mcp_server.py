@@ -154,7 +154,18 @@ def synthesize_continuity(
         "save_id": save_id,
         "include_all_sessions": include_all_sessions
     })
-
+@mcp.tool()
+def run_benchmark(
+    benchmark_id: str = "BR-001-draft-state-recovery-benchmark",
+    model: str = "default",
+    save_result: bool = True
+) -> Dict[str, Any]:
+    """Run a PMEi benchmark through Dave Runner and optionally save the result."""
+    return call_dave("/memory/benchmark/run", {
+        "benchmark_id": benchmark_id,
+        "model": model,
+        "save_result": save_result
+    })
 @mcp.tool()
 def keepalive() -> Dict[str, Any]:
     """Keep the MCP bridge warm and verify Dave Runner is reachable."""
