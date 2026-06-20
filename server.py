@@ -1051,6 +1051,7 @@ def memory_search():
     except Exception as exc:
         return fail(f"Database error: {exc}", 500)
 
+POST /memory/benchmark/run
 
 @app.route("/memory/export", methods=["POST"])
 def memory_export():
