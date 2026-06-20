@@ -1061,18 +1061,162 @@ def benchmark_run():
     if err:
         return err
 
-    benchmark_id = (data.get("benchmark_id") or "").strip()
-    model = (data.get("model") or "default").strip()
+    if not openai_client:
+        return fail("OpenAI not configured", 503)
+
+    benchmark_id = (data.get("benchmark_id") or "BR-001-draft-state-recovery-benchmark").strip()
+    model = (data.get("model") or OPENAI_MODEL).strip()
     save_result = bool(data.get("save_result", True))
 
-    return ok({
+    continuity_packet = """
+Project: Build a kayak trailer.
+
+Goal:
+Design a safe, road-legal kayak trailer for family use.
+
+Constraints:
+- Maximum load: 150kg
+- Budget: £800
+- UK road legal
+- Foldable outriggers
+- Safe for family use
+
+Decisions:
+- Aluminium frame
+- Compact modular design
+- Lighting system separate from folding mechanism
+
+Open Threads:
+- Suspension type not chosen
+- Lighting parts not chosen
+- Final weight estimate not confirmed
+
+Next Action:
+Choose suspension type and validate load rating.
+""".strip()
+
+    final_question = """
+Reconstruct the current project state.
+
+Return:
+1. Goal
+2. Constraints
+3. Decisions
+4. Open threads
+5. Next action
+""".strip()
+
+    def ask_model(messages):
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+            max_tokens=500
+        )
+        return response.choices[0].message.content.strip()
+
+    baseline_answer = ask_model([
+        {"role": "system", "content": "Answer only from information provided in this chat. Do not invent missing project state."},
+        {"role": "user", "content": final_question}
+    ])
+
+    pmei_answer = ask_model([
+        {"role": "system", "content": "Use the provided PMEi continuity packet to reconstruct project state."},
+        {"role": "user", "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"}
+    ])
+
+    expected_terms = {
+        "goal": ["kayak trailer", "road-legal", "family"],
+        "constraints": ["150kg", "£800", "UK", "foldable", "safe"],
+        "decisions": ["aluminium", "compact", "modular", "lighting"],
+        "open_threads": ["suspension", "lighting parts", "weight estimate"],
+        "next_action": ["choose suspension", "validate load"]
+    }
+
+    def score_answer(answer):
+        lower = answer.lower()
+        scores = {}
+        total = 0
+
+        for category, terms in expected_terms.items():
+            hits = sum(1 for term in terms if term.lower() in lower)
+            category_score = round((hits / len(terms)) * 10, 2)
+            scores[category] = category_score
+            total += category_score
+
+        return round(total, 2), scores
+
+    baseline_score, baseline_breakdown = score_answer(baseline_answer)
+    pmei_score, pmei_breakdown = score_answer(pmei_answer)
+    improvement = round(pmei_score - baseline_score, 2)
+
+    run_id = f"BR-001-run-{int(time.time())}"
+
+    result = {
+        "run_id": run_id,
         "benchmark_id": benchmark_id,
         "model": model,
-        "save_result": save_result,
-        "status": "endpoint_created",
-        "message": "Benchmark runner placeholder active"
-    })
+        "baseline_score": baseline_score,
+        "pmei_score": pmei_score,
+        "improvement": improvement,
+        "baseline_breakdown": baseline_breakdown,
+        "pmei_breakdown": pmei_breakdown,
+        "baseline_answer": baseline_answer,
+        "pmei_answer": pmei_answer,
+        "continuity_packet": continuity_packet,
+        "final_question": final_question,
+        "status": "completed"
+    }
 
+    if save_result:
+        try:
+            with get_db() as conn, conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO continuity_records (
+                        save_id, user_id, session_ref, drift_score,
+                        human_title, human_summary, decision_made, why_it_matters,
+                        next_steps, chat_recall,
+                        goal_state, active_constraints, key_insights, open_threads,
+                        context_shard, anchor_points, last_stable_state,
+                        learning_events, successful_patterns, failed_patterns,
+                        capability_scores, adaptation_notes, recommended_actions,
+                        seal
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id, timestamp;
+                """, (
+                    run_id, owner_user_id(), "pmei_benchmarks", 0.01,
+                    "BR-001 Benchmark Run Result",
+                    f"Baseline scored {baseline_score}/50. PMEi scored {pmei_score}/50. Improvement: {improvement}.",
+                    "Executed BR-001 State Recovery Benchmark.",
+                    "Creates auditable evidence for whether PMEi continuity improves state reconstruction.",
+                    Jsonb(["Aggregate multiple BR-001 runs into BR-001-summary"]),
+                    Jsonb([]),
+                    "Measure PMEi state recovery performance.",
+                    Jsonb(["same_model_comparison", "auditable_result", "no_overclaiming"]),
+                    Jsonb([f"PMEi improvement: {improvement}", f"Baseline score: {baseline_score}", f"PMEi score: {pmei_score}"]),
+                    Jsonb(["Repeat benchmark runs", "Add raw chat history comparison"]),
+                    str(result),
+                    Jsonb(["BR-001", "benchmark_run", "state_recovery"]),
+                    benchmark_id,
+                    Jsonb(["BR-001 benchmark execution completed"]),
+                    Jsonb(["Automated benchmark route executed and saved result"]),
+                    Jsonb([]),
+                    Jsonb({"baseline_score": baseline_score, "pmei_score": pmei_score, "improvement": improvement}),
+                    "Automated benchmark scoring uses keyword matching v0.1; future evaluator should be stricter.",
+                    Jsonb(["Run at least 10 trials", "Create BR-001-summary"]),
+                    "lawful"
+                ))
+                saved_record_id, saved_timestamp = cur.fetchone()
+                conn.commit()
+                result["saved"] = True
+                result["saved_record_id"] = saved_record_id
+                result["saved_timestamp"] = str(saved_timestamp)
+        except Exception as exc:
+            result["saved"] = False
+            result["save_error"] = str(exc)
+
+    return ok(result)
 @app.route("/memory/export", methods=["POST"])
 def memory_export():
     auth_err = require_memory_auth()
