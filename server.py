@@ -1064,11 +1064,10 @@ def benchmark_run():
     if not openai_client:
         return fail("OpenAI not configured", 503)
 
-        benchmark_id = (data.get("benchmark_id") or "BR-001-draft-state-recovery-benchmark").strip()
-    model = (data.get("model") or OPENAI_MODEL).strip()
-    if model == "default":
-        model = OPENAI_MODEL
-
+    benchmark_id = (data.get("benchmark_id") or "BR-001-draft-state-recovery-benchmark").strip()
+   model = (data.get("model") or OPENAI_MODEL).strip()
+if model == "default":
+    model = OPENAI_MODEL
     save_result = bool(data.get("save_result", True))
 
     continuity_packet = """
