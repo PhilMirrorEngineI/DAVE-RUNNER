@@ -1065,9 +1065,10 @@ def benchmark_run():
         return fail("OpenAI not configured", 503)
 
     benchmark_id = (data.get("benchmark_id") or "BR-001-draft-state-recovery-benchmark").strip()
-   model = (data.get("model") or OPENAI_MODEL).strip()
-if model == "default":
-    model = OPENAI_MODEL
+    model = (data.get("model") or OPENAI_MODEL).strip()
+    if model == "default":
+        model = OPENAI_MODEL
+
     save_result = bool(data.get("save_result", True))
 
     continuity_packet = """
@@ -1117,23 +1118,30 @@ Return:
         )
         return response.choices[0].message.content.strip()
 
-   try:
-    baseline_answer = ask_model([
-        {"role": "system", "content": "Answer only from information provided in this chat. Do not invent missing project state."},
-        {"role": "user", "content": final_question}
-    ])
+    try:
+        baseline_answer = ask_model([
+            {
+                "role": "system",
+                "content": "Answer only from information provided in this chat. Do not invent missing project state."
+            },
+            {
+                "role": "user",
+                "content": final_question
+            }
+        ])
 
-    pmei_answer = ask_model([
-        {"role": "system", "content": "Use the provided PMEi continuity packet to reconstruct project state."},
-        {"role": "user", "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"}
-    ])
-except Exception as exc:
-    return fail(f"Benchmark model call error: {exc}", 500)
-
-    pmei_answer = ask_model([
-        {"role": "system", "content": "Use the provided PMEi continuity packet to reconstruct project state."},
-        {"role": "user", "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"}
-    ])
+        pmei_answer = ask_model([
+            {
+                "role": "system",
+                "content": "Use the provided PMEi continuity packet to reconstruct project state."
+            },
+            {
+                "role": "user",
+                "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"
+            }
+        ])
+    except Exception as exc:
+        return fail(f"Benchmark model call error: {exc}", 500)
 
     expected_terms = {
         "goal": ["kayak trailer", "road-legal", "family"],
@@ -1144,9 +1152,9 @@ except Exception as exc:
     }
 
     def score_answer(answer):
-        lower = answer.lower()
+        lower = (answer or "").lower()
         scores = {}
-        total = 0
+        total = 0.0
 
         for category, terms in expected_terms.items():
             hits = sum(1 for term in terms if term.lower() in lower)
@@ -1204,7 +1212,11 @@ except Exception as exc:
                     Jsonb([]),
                     "Measure PMEi state recovery performance.",
                     Jsonb(["same_model_comparison", "auditable_result", "no_overclaiming"]),
-                    Jsonb([f"PMEi improvement: {improvement}", f"Baseline score: {baseline_score}", f"PMEi score: {pmei_score}"]),
+                    Jsonb([
+                        f"PMEi improvement: {improvement}",
+                        f"Baseline score: {baseline_score}",
+                        f"PMEi score: {pmei_score}"
+                    ]),
                     Jsonb(["Repeat benchmark runs", "Add raw chat history comparison"]),
                     str(result),
                     Jsonb(["BR-001", "benchmark_run", "state_recovery"]),
@@ -1212,7 +1224,11 @@ except Exception as exc:
                     Jsonb(["BR-001 benchmark execution completed"]),
                     Jsonb(["Automated benchmark route executed and saved result"]),
                     Jsonb([]),
-                    Jsonb({"baseline_score": baseline_score, "pmei_score": pmei_score, "improvement": improvement}),
+                    Jsonb({
+                        "baseline_score": baseline_score,
+                        "pmei_score": pmei_score,
+                        "improvement": improvement
+                    }),
                     "Automated benchmark scoring uses keyword matching v0.1; future evaluator should be stricter.",
                     Jsonb(["Run at least 10 trials", "Create BR-001-summary"]),
                     "lawful"
@@ -1227,6 +1243,8 @@ except Exception as exc:
             result["save_error"] = str(exc)
 
     return ok(result)
+
+
 @app.route("/memory/export", methods=["POST"])
 def memory_export():
     auth_err = require_memory_auth()
