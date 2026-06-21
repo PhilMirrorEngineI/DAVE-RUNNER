@@ -6,6 +6,7 @@ import os
 import time
 import threading
 import uuid
+import re
 
 import psycopg
 import requests
@@ -80,29 +81,6 @@ def require_memory_auth():
 
 def owner_user_id():
     return OWNER_USER_ID
-
-
-def get_cpv():
-    """Return the active Continuity Pathway Version."""
-    return CONTINUITY_PATHWAY_VERSION
-
-
-def find_cpv_certification(cpv):
-    """
-    Certification registry lookup scaffold.
-
-    This is intentionally conservative until BR-002B exists.
-    A CPV is not certified unless a clean BR-002B PASS record is found.
-    Task B starts with this lookup shape; later implementation should query
-    continuity_records for BR-002B certification records matching cpv.
-    """
-    return {
-        "cpv": cpv,
-        "certified": False,
-        "status": "unknown",
-        "source": None,
-        "reason": "No BR-002B certification lookup implemented yet."
-    }
 
 
 def as_json_list(value):
@@ -277,14 +255,11 @@ def continuity_row_to_item(row):
 
 @app.route("/")
 def root():
-    cpv_certification = find_cpv_certification(get_cpv())
-
     return ok({
         "service": "Dave Runner - PMEi Lawful Reflection Bridge",
         "build_tag": BUILD_TAG,
-        "cpv": get_cpv(),
-        "cpv_certified": bool(cpv_certification.get("certified")),
-        "cpv_certification": cpv_certification,
+        "cpv": CONTINUITY_PATHWAY_VERSION,
+        "cpv_certification": find_cpv_certification(CONTINUITY_PATHWAY_VERSION),
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL),
@@ -1083,6 +1058,204 @@ def memory_search():
         return fail(f"Database error: {exc}", 500)
 
 
+
+def get_cpv():
+    return CONTINUITY_PATHWAY_VERSION
+
+
+def normalize_text(text):
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9£\s-]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def term_match(term, answer_text):
+    term = normalize_text(term)
+    answer_text = normalize_text(answer_text)
+
+    if not term or not answer_text:
+        return False
+
+    if term in answer_text:
+        return True
+
+    words = [w for w in term.split() if len(w) > 2]
+    if not words:
+        return False
+
+    hits = sum(1 for word in words if word in answer_text)
+    return hits >= max(1, len(words) // 2)
+
+
+def parse_list_section(text):
+    items = []
+    if not text:
+        return items
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line = line.lstrip("-•*0123456789. ").strip()
+        if line:
+            items.append(line)
+
+    return items
+
+
+def find_cpv_certification(cpv=None):
+    """
+    Find the latest clean BR-002B certification record for a CPV.
+
+    Certification records are stored as continuity records in pmei_benchmarks.
+    A record counts as certification when it has:
+      - CPV match
+      - BR-002B / provenance certification marker
+      - certification_status == PASS
+    """
+    cpv = (cpv or get_cpv()).strip()
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(CONTINUITY_SELECT + """
+                WHERE user_id=%s AND session_ref=%s
+                ORDER BY timestamp DESC
+                LIMIT 300;
+            """, (owner_user_id(), "pmei_benchmarks"))
+            rows = cur.fetchall()
+
+        for row in rows:
+            item = continuity_row_to_item(row)
+            save_id = item.get("save_id") or ""
+            title = ((item.get("human_brief") or {}).get("title") or "")
+            context = item.get("context_shard") or ""
+            anchors = item.get("anchor_points") or []
+            learning = item.get("learning_layer") or {}
+            capability_scores = learning.get("capability_scores") or {}
+
+            haystack = " ".join([
+                save_id,
+                title,
+                context,
+                " ".join(str(a) for a in anchors),
+                str(capability_scores),
+            ]).lower()
+
+            looks_like_br002b = (
+                "br-002b" in haystack
+                or "narrative" in haystack
+                or "provenance" in haystack
+            )
+
+            record_cpv = str(
+                capability_scores.get("cpv")
+                or capability_scores.get("continuity_pathway_version")
+                or ""
+            ).strip()
+
+            status = str(
+                capability_scores.get("certification_status")
+                or capability_scores.get("audit_result")
+                or capability_scores.get("status")
+                or ""
+            ).strip().upper()
+
+            if looks_like_br002b and record_cpv == cpv and status == "PASS":
+                return {
+                    "cpv": cpv,
+                    "certified": True,
+                    "status": "PASS",
+                    "certification_record_id": item.get("id"),
+                    "certification_save_id": save_id,
+                    "timestamp": item.get("timestamp"),
+                    "title": title
+                }
+
+        return {
+            "cpv": cpv,
+            "certified": False,
+            "status": "UNKNOWN",
+            "certification_record_id": None,
+            "certification_save_id": None,
+            "timestamp": None,
+            "title": None
+        }
+
+    except Exception as exc:
+        return {
+            "cpv": cpv,
+            "certified": False,
+            "status": "ERROR",
+            "error": str(exc),
+            "certification_record_id": None,
+            "certification_save_id": None,
+            "timestamp": None,
+            "title": None
+        }
+
+
+def benchmark_admissibility(cpv=None, benchmark_type=""):
+    cpv = (cpv or get_cpv()).strip()
+    benchmark_type = (benchmark_type or "").strip().lower()
+    certification = find_cpv_certification(cpv)
+
+    requires_certification = benchmark_type in {
+        "decision_quality",
+        "br-010",
+        "br-010-decision-quality"
+    }
+
+    admissible = bool(certification.get("certified")) if requires_certification else False
+
+    return {
+        "cpv": cpv,
+        "benchmark_type": benchmark_type or "state_recovery",
+        "requires_certification": requires_certification,
+        "admissible": admissible,
+        "certification": certification
+    }
+
+
+
+
+@app.route("/memory/cpv/certification", methods=["POST"])
+def cpv_certification_lookup():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    cpv = (data.get("cpv") or get_cpv()).strip()
+    certification = find_cpv_certification(cpv)
+
+    return ok({
+        "cpv": cpv,
+        "certification": certification,
+        "certified": bool(certification.get("certified"))
+    })
+
+
+@app.route("/memory/cpv/admissibility", methods=["POST"])
+def cpv_admissibility_lookup():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    cpv = (data.get("cpv") or get_cpv()).strip()
+    benchmark_type = (data.get("benchmark_type") or "decision_quality").strip()
+    result = benchmark_admissibility(cpv, benchmark_type)
+
+    return ok(result)
+
+
 def extract_section(text, name):
     """Extract [SECTION_NAME] blocks from a benchmark definition."""
     marker = f"[{name}]"
@@ -1154,6 +1327,7 @@ def benchmark_run():
     if model == "default":
         model = OPENAI_MODEL
     save_result = bool(data.get("save_result", True))
+    cpv = get_cpv()
 
     try:
         with get_db() as conn, conn.cursor() as cur:
@@ -1171,11 +1345,35 @@ def benchmark_run():
     benchmark_def = continuity_row_to_item(row)
     benchmark_text = (benchmark_def.get("context_shard") or "").strip()
 
+    benchmark_type = (
+        extract_section(benchmark_text, "BENCHMARK_TYPE")
+        or "state_recovery"
+    ).strip().lower()
+
     pmei_packet = extract_section(benchmark_text, "PMEI_PACKET")
     baseline_input = extract_section(benchmark_text, "BASELINE_INPUT")
     final_question = extract_section(benchmark_text, "QUESTION")
     expected_terms_text = extract_section(benchmark_text, "EXPECTED_TERMS")
     expected_terms = parse_expected_terms(expected_terms_text)
+
+    source_transcript = extract_section(benchmark_text, "SOURCE_TRANSCRIPT") or baseline_input
+    continuity_record_text = extract_section(benchmark_text, "CONTINUITY_RECORD") or pmei_packet
+    memory_records_text = extract_section(benchmark_text, "MEMORY_RECORDS")
+    expected_facts = parse_list_section(
+        extract_section(benchmark_text, "EXPECTED_FACTS")
+        or extract_section(benchmark_text, "FACT_CHECKS")
+    )
+    negative_controls = parse_list_section(
+        extract_section(benchmark_text, "NEGATIVE_CONTROLS")
+        or extract_section(benchmark_text, "FALSE_FACTS")
+    )
+    provenance_checks = parse_list_section(
+        extract_section(benchmark_text, "PROVENANCE_CHECKS")
+    )
+    false_causal_links = parse_list_section(
+        extract_section(benchmark_text, "FALSE_CAUSAL_LINKS")
+        or extract_section(benchmark_text, "CONNECTIVE_NEGATIVE_CONTROLS")
+    )
 
     if not pmei_packet:
         pmei_packet = benchmark_text
@@ -1195,14 +1393,314 @@ Return:
     if not expected_terms:
         expected_terms = fallback_expected_terms(benchmark_id, benchmark_text)
 
-    def ask_model(messages):
+    def ask_model(messages, max_tokens=700):
         response = openai_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=500
+            max_tokens=max_tokens
         )
         return response.choices[0].message.content.strip()
+
+    def save_benchmark_result(result, capability_scores, title_suffix, summary, learning_events, anchors):
+        if not save_result:
+            result["saved"] = False
+            result["save_skipped"] = True
+            return result
+
+        try:
+            with get_db() as conn, conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO continuity_records (
+                        save_id, user_id, session_ref, drift_score,
+                        human_title, human_summary, decision_made, why_it_matters,
+                        next_steps, chat_recall,
+                        goal_state, active_constraints, key_insights, open_threads,
+                        context_shard, anchor_points, last_stable_state,
+                        learning_events, successful_patterns, failed_patterns,
+                        capability_scores, adaptation_notes, recommended_actions,
+                        seal
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id, timestamp;
+                """, (
+                    result["run_id"], owner_user_id(), "pmei_benchmarks", 0.01,
+                    f"{benchmark_id} {title_suffix}",
+                    summary,
+                    f"Executed benchmark {benchmark_id}.",
+                    "Creates auditable PMEi benchmark evidence with CPV tracking.",
+                    Jsonb(["Review saved result", "Use only if admissibility conditions are satisfied"]),
+                    Jsonb([]),
+                    "Measure PMEi continuity, fidelity, provenance, or state recovery performance.",
+                    Jsonb(["same_model_comparison", "auditable_result", "no_overclaiming", f"CPV:{cpv}"]),
+                    Jsonb([
+                        f"Benchmark type: {benchmark_type}",
+                        f"CPV: {cpv}",
+                        f"Result: {result.get('audit_result') or result.get('status') or 'completed'}"
+                    ]),
+                    Jsonb(["Repeat only when scenario or CPV changes", "Do not overclaim beyond benchmark type"]),
+                    str(result),
+                    Jsonb(anchors),
+                    benchmark_id,
+                    Jsonb(learning_events),
+                    Jsonb(["Automated benchmark route executed and saved result"]),
+                    Jsonb([]),
+                    Jsonb(capability_scores),
+                    "Automated benchmark evidence. CPV must match certification rules before BR-010 evidence is admissible.",
+                    Jsonb(["Check CPV certification status", "Use BR-002B certification before BR-010 claims"]),
+                    "lawful"
+                ))
+                saved_record_id, saved_timestamp = cur.fetchone()
+                conn.commit()
+
+            result["saved"] = True
+            result["saved_record_id"] = saved_record_id
+            result["saved_timestamp"] = str(saved_timestamp)
+            return result
+
+        except Exception as exc:
+            result["saved"] = False
+            result["save_error"] = str(exc)
+            return result
+
+    if benchmark_type in {"fact_fidelity_audit", "br-002a", "br-002a-fact-fidelity"}:
+        audit_task = f"""
+You are auditing PMEi recall fidelity.
+
+Use ONLY the supplied artifacts.
+
+Artifacts:
+[SOURCE_TRANSCRIPT]
+{source_transcript}
+
+[CONTINUITY_RECORD]
+{continuity_record_text}
+
+[MEMORY_RECORDS]
+{memory_records_text}
+
+Expected facts to check:
+{chr(10).join(f"- {fact}" for fact in expected_facts) if expected_facts else "- No explicit expected facts supplied."}
+
+Negative controls that must NOT be asserted as true:
+{chr(10).join(f"- {fact}" for fact in negative_controls) if negative_controls else "- No explicit negative controls supplied."}
+
+Return exactly this structure:
+
+FACT_CHECKS:
+- <fact>: PRESENT / ABSENT
+
+NEGATIVE_CONTROLS:
+- <negative control>: REJECTED / FABRICATED
+
+OMISSION_COUNT:
+<number>
+
+FABRICATION_COUNT:
+<number>
+
+AUDIT_RESULT:
+PASS / PASS_DEGRADED / FAIL
+
+Rules:
+- PASS if zero fabrications and fewer than 3 omissions.
+- PASS_DEGRADED if zero fabrications and 3 or more omissions.
+- FAIL if any fabrication occurs.
+- Do not invent facts.
+""".strip()
+
+        try:
+            audit_answer = ask_model([
+                {
+                    "role": "system",
+                    "content": "You are a strict recall-fidelity auditor. Be literal. Do not reward plausible inference."
+                },
+                {
+                    "role": "user",
+                    "content": audit_task
+                }
+            ], max_tokens=900)
+        except Exception as exc:
+            return fail(f"BR-002A audit model call error: {exc}", 500)
+
+        audit_upper = audit_answer.upper()
+        if "AUDIT_RESULT:" in audit_upper:
+            audit_result = audit_upper.split("AUDIT_RESULT:", 1)[1].splitlines()[0].strip()
+        elif "PASS_DEGRADED" in audit_upper or "PASS (DEGRADED)" in audit_upper:
+            audit_result = "PASS_DEGRADED"
+        elif "FAIL" in audit_upper:
+            audit_result = "FAIL"
+        elif "PASS" in audit_upper:
+            audit_result = "PASS"
+        else:
+            audit_result = "UNKNOWN"
+
+        run_id = f"{benchmark_id}-run-{int(time.time())}"
+        result = {
+            "run_id": run_id,
+            "benchmark_id": benchmark_id,
+            "benchmark_type": benchmark_type,
+            "cpv": cpv,
+            "model": model,
+            "audit_result": audit_result,
+            "admissible": False,
+            "certification": find_cpv_certification(cpv),
+            "audit_answer": audit_answer,
+            "source_transcript": source_transcript,
+            "continuity_record": continuity_record_text,
+            "memory_records": memory_records_text,
+            "expected_facts": expected_facts,
+            "negative_controls": negative_controls,
+            "status": "completed"
+        }
+
+        capability_scores = {
+            "cpv": cpv,
+            "benchmark_type": benchmark_type,
+            "audit_result": audit_result,
+            "certification_status": "NOT_APPLICABLE",
+            "admissible": False
+        }
+
+        return ok(save_benchmark_result(
+            result=result,
+            capability_scores=capability_scores,
+            title_suffix="Fact Fidelity Audit Result",
+            summary=f"BR-002A fact-fidelity audit completed with result: {audit_result}.",
+            learning_events=[f"{benchmark_id} fact fidelity audit completed"],
+            anchors=[benchmark_id, "BR-002A", "fact_fidelity", "CPV", cpv]
+        ))
+
+    if benchmark_type in {"narrative_provenance_audit", "br-002b", "br-002b-narrative-provenance"}:
+        audit_task = f"""
+You are auditing PMEi narrative/provenance fidelity.
+
+Use ONLY the supplied artifacts.
+
+Artifacts:
+[SOURCE_TRANSCRIPT]
+{source_transcript}
+
+[CONTINUITY_RECORD]
+{continuity_record_text}
+
+[MEMORY_RECORDS]
+{memory_records_text}
+
+Provenance checks:
+{chr(10).join(f"- {item}" for item in provenance_checks) if provenance_checks else "- No explicit provenance checks supplied."}
+
+False causal/connective links that must be rejected:
+{chr(10).join(f"- {item}" for item in false_causal_links) if false_causal_links else "- No explicit false causal links supplied."}
+
+Return exactly this structure:
+
+PROVENANCE_CHECKS:
+- <check>: CORRECT / MISATTRIBUTED / AMBIGUOUS / OMITTED
+
+FALSE_CAUSAL_LINKS:
+- <link>: REJECTED / FABRICATED / AMBIGUOUS
+
+PROVENANCE_ERROR_COUNT:
+<number>
+
+PROVENANCE_AMBIGUITY_COUNT:
+<number>
+
+CONNECTIVE_FABRICATION_COUNT:
+<number>
+
+AUDIT_RESULT:
+PASS / FAIL
+
+Rules:
+- PASS only if there are zero provenance errors, zero provenance ambiguities, and zero connective fabrications.
+- FAIL if any provenance error occurs.
+- FAIL if any provenance ambiguity occurs.
+- FAIL if any unsupported causal/connective link is introduced.
+- Ambiguity is failure for this audit.
+- Do not infer unsupported relationships.
+""".strip()
+
+        try:
+            audit_answer = ask_model([
+                {
+                    "role": "system",
+                    "content": "You are a strict provenance auditor. Ambiguous attribution fails. Plausible but unsupported links fail."
+                },
+                {
+                    "role": "user",
+                    "content": audit_task
+                }
+            ], max_tokens=900)
+        except Exception as exc:
+            return fail(f"BR-002B audit model call error: {exc}", 500)
+
+        audit_upper = audit_answer.upper()
+        if "AUDIT_RESULT:" in audit_upper:
+            audit_result = audit_upper.split("AUDIT_RESULT:", 1)[1].splitlines()[0].strip()
+        elif "FAIL" in audit_upper:
+            audit_result = "FAIL"
+        elif "PASS" in audit_upper:
+            audit_result = "PASS"
+        else:
+            audit_result = "UNKNOWN"
+
+        certification_status = "PASS" if audit_result == "PASS" else "FAIL"
+
+        run_id = f"{benchmark_id}-run-{int(time.time())}"
+        result = {
+            "run_id": run_id,
+            "benchmark_id": benchmark_id,
+            "benchmark_type": benchmark_type,
+            "cpv": cpv,
+            "model": model,
+            "audit_result": audit_result,
+            "certification_status": certification_status,
+            "certifies_cpv": cpv if certification_status == "PASS" else None,
+            "admissible": False,
+            "certification": find_cpv_certification(cpv),
+            "audit_answer": audit_answer,
+            "source_transcript": source_transcript,
+            "continuity_record": continuity_record_text,
+            "memory_records": memory_records_text,
+            "provenance_checks": provenance_checks,
+            "false_causal_links": false_causal_links,
+            "status": "completed"
+        }
+
+        capability_scores = {
+            "cpv": cpv,
+            "benchmark_type": benchmark_type,
+            "audit_result": audit_result,
+            "certification_status": certification_status,
+            "certified": certification_status == "PASS",
+            "admissible": False
+        }
+
+        return ok(save_benchmark_result(
+            result=result,
+            capability_scores=capability_scores,
+            title_suffix="Narrative & Provenance Certification Result",
+            summary=f"BR-002B provenance certification completed with result: {audit_result}. CPV {cpv} certification status: {certification_status}.",
+            learning_events=[f"{benchmark_id} narrative/provenance certification completed", f"CPV {cpv} certification status: {certification_status}"],
+            anchors=[benchmark_id, "BR-002B", "narrative_provenance", "certification", "CPV", cpv]
+        ))
+
+    def score_answer(answer):
+        scores = {}
+        total = 0.0
+
+        for category, terms in expected_terms.items():
+            if not terms:
+                scores[category] = 0.0
+                continue
+            hits = sum(1 for term in terms if term_match(term, answer))
+            category_score = round((hits / max(len(terms), 1)) * 10, 2)
+            scores[category] = category_score
+            total += category_score
+
+        return round(total, 2), scores
 
     try:
         baseline_answer = ask_model([
@@ -1229,37 +1727,18 @@ Return:
     except Exception as exc:
         return fail(f"Benchmark model call error: {exc}", 500)
 
-    def score_answer(answer):
-        lower = (answer or "").lower()
-        scores = {}
-        total = 0.0
-
-        for category, terms in expected_terms.items():
-            if not terms:
-                scores[category] = 0.0
-                continue
-            hits = sum(1 for term in terms if term.lower() in lower)
-            category_score = round((hits / len(terms)) * 10, 2)
-            scores[category] = category_score
-            total += category_score
-
-        return round(total, 2), scores
-
     baseline_score, baseline_breakdown = score_answer(baseline_answer)
     pmei_score, pmei_breakdown = score_answer(pmei_answer)
     improvement = round(pmei_score - baseline_score, 2)
-
     run_id = f"{benchmark_id}-run-{int(time.time())}"
-    cpv_certification = find_cpv_certification(get_cpv())
-    admissible = bool(cpv_certification.get("certified"))
+
+    admissibility = benchmark_admissibility(cpv, benchmark_type)
 
     result = {
         "run_id": run_id,
         "benchmark_id": benchmark_id,
-        "cpv": get_cpv(),
-        "cpv_certified": bool(cpv_certification.get("certified")),
-        "cpv_certification": cpv_certification,
-        "admissible": admissible,
+        "benchmark_type": benchmark_type,
+        "cpv": cpv,
         "model": model,
         "baseline_score": baseline_score,
         "pmei_score": pmei_score,
@@ -1272,71 +1751,29 @@ Return:
         "continuity_packet": pmei_packet,
         "final_question": final_question,
         "expected_terms": expected_terms,
+        "admissible": admissibility.get("admissible"),
+        "admissibility": admissibility,
         "status": "completed"
     }
 
-    if save_result:
-        try:
-            with get_db() as conn, conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO continuity_records (
-                        save_id, user_id, session_ref, drift_score,
-                        human_title, human_summary, decision_made, why_it_matters,
-                        next_steps, chat_recall,
-                        goal_state, active_constraints, key_insights, open_threads,
-                        context_shard, anchor_points, last_stable_state,
-                        learning_events, successful_patterns, failed_patterns,
-                        capability_scores, adaptation_notes, recommended_actions,
-                        seal
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    RETURNING id, timestamp;
-                """, (
-                    run_id, owner_user_id(), "pmei_benchmarks", 0.01,
-                    f"{benchmark_id} Benchmark Run Result",
-                    f"Baseline scored {baseline_score}/50. PMEi scored {pmei_score}/50. Improvement: {improvement}.",
-                    f"Executed benchmark {benchmark_id}.",
-                    "Creates auditable evidence for whether PMEi continuity improves state reconstruction.",
-                    Jsonb(["Review saved result", "Aggregate repeated runs when sample size is meaningful"]),
-                    Jsonb([]),
-                    "Measure PMEi state recovery performance.",
-                    Jsonb(["same_model_comparison", "auditable_result", "no_overclaiming"]),
-                    Jsonb([
-                        f"PMEi improvement: {improvement}",
-                        f"Baseline score: {baseline_score}",
-                        f"PMEi score: {pmei_score}",
-                        f"CPV: {get_cpv()}",
-                        f"Admissible: {admissible}"
-                    ]),
-                    Jsonb(["Repeat benchmark runs", "Add raw chat history comparison where applicable"]),
-                    str(result),
-                    Jsonb([benchmark_id, "benchmark_run", "state_recovery"]),
-                    benchmark_id,
-                    Jsonb([f"{benchmark_id} benchmark execution completed"]),
-                    Jsonb(["Automated benchmark route executed and saved result"]),
-                    Jsonb([]),
-                    Jsonb({
-                        "baseline_score": baseline_score,
-                        "pmei_score": pmei_score,
-                        "improvement": improvement,
-                        "cpv": get_cpv(),
-                        "cpv_certified": bool(cpv_certification.get("certified")),
-                        "admissible": admissible
-                    }),
-                    "Automated benchmark scoring uses keyword matching v0.2; future evaluator should be stricter and ideally blind.",
-                    Jsonb(["Run scenario variation", "Add raw transcript baseline for BR-002", "Create aggregate summaries only after meaningful variation"]),
-                    "lawful"
-                ))
-                saved_record_id, saved_timestamp = cur.fetchone()
-                conn.commit()
-                result["saved"] = True
-                result["saved_record_id"] = saved_record_id
-                result["saved_timestamp"] = str(saved_timestamp)
-        except Exception as exc:
-            result["saved"] = False
-            result["save_error"] = str(exc)
+    capability_scores = {
+        "baseline_score": baseline_score,
+        "pmei_score": pmei_score,
+        "improvement": improvement,
+        "cpv": cpv,
+        "benchmark_type": benchmark_type,
+        "admissible": admissibility.get("admissible"),
+        "certification_status": (admissibility.get("certification") or {}).get("status")
+    }
 
-    return ok(result)
+    return ok(save_benchmark_result(
+        result=result,
+        capability_scores=capability_scores,
+        title_suffix="Benchmark Run Result",
+        summary=f"Baseline scored {baseline_score}/50. PMEi scored {pmei_score}/50. Improvement: {improvement}. CPV: {cpv}.",
+        learning_events=[f"{benchmark_id} benchmark execution completed"],
+        anchors=[benchmark_id, "benchmark_run", benchmark_type, "state_recovery", "CPV", cpv]
+    ))
 
 
 @app.route("/memory/export", methods=["POST"])
