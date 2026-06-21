@@ -6,7 +6,7 @@ import os
 import time
 import threading
 import uuid
-
+import re
 import psycopg
 import requests
 from flask import Flask, jsonify, request
@@ -1200,7 +1200,6 @@ Return:
     except Exception as exc:
         return fail(f"Benchmark model call error: {exc}", 500)
 
-   import re
 
 def normalize_text(text):
     text = (text or "").lower()
