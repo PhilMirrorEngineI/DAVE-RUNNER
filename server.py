@@ -82,6 +82,29 @@ def owner_user_id():
     return OWNER_USER_ID
 
 
+def get_cpv():
+    """Return the active Continuity Pathway Version."""
+    return CONTINUITY_PATHWAY_VERSION
+
+
+def find_cpv_certification(cpv):
+    """
+    Certification registry lookup scaffold.
+
+    This is intentionally conservative until BR-002B exists.
+    A CPV is not certified unless a clean BR-002B PASS record is found.
+    Task B starts with this lookup shape; later implementation should query
+    continuity_records for BR-002B certification records matching cpv.
+    """
+    return {
+        "cpv": cpv,
+        "certified": False,
+        "status": "unknown",
+        "source": None,
+        "reason": "No BR-002B certification lookup implemented yet."
+    }
+
+
 def as_json_list(value):
     if value is None:
         return []
@@ -254,10 +277,14 @@ def continuity_row_to_item(row):
 
 @app.route("/")
 def root():
+    cpv_certification = find_cpv_certification(get_cpv())
+
     return ok({
         "service": "Dave Runner - PMEi Lawful Reflection Bridge",
         "build_tag": BUILD_TAG,
-        "cpv": CONTINUITY_PATHWAY_VERSION,
+        "cpv": get_cpv(),
+        "cpv_certified": bool(cpv_certification.get("certified")),
+        "cpv_certification": cpv_certification,
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL),
@@ -1223,11 +1250,16 @@ Return:
     improvement = round(pmei_score - baseline_score, 2)
 
     run_id = f"{benchmark_id}-run-{int(time.time())}"
+    cpv_certification = find_cpv_certification(get_cpv())
+    admissible = bool(cpv_certification.get("certified"))
 
     result = {
         "run_id": run_id,
         "benchmark_id": benchmark_id,
-        "cpv": CONTINUITY_PATHWAY_VERSION,
+        "cpv": get_cpv(),
+        "cpv_certified": bool(cpv_certification.get("certified")),
+        "cpv_certification": cpv_certification,
+        "admissible": admissible,
         "model": model,
         "baseline_score": baseline_score,
         "pmei_score": pmei_score,
@@ -1273,7 +1305,8 @@ Return:
                         f"PMEi improvement: {improvement}",
                         f"Baseline score: {baseline_score}",
                         f"PMEi score: {pmei_score}",
-                        f"CPV: {CONTINUITY_PATHWAY_VERSION}"
+                        f"CPV: {get_cpv()}",
+                        f"Admissible: {admissible}"
                     ]),
                     Jsonb(["Repeat benchmark runs", "Add raw chat history comparison where applicable"]),
                     str(result),
@@ -1286,7 +1319,9 @@ Return:
                         "baseline_score": baseline_score,
                         "pmei_score": pmei_score,
                         "improvement": improvement,
-                        "cpv": CONTINUITY_PATHWAY_VERSION
+                        "cpv": get_cpv(),
+                        "cpv_certified": bool(cpv_certification.get("certified")),
+                        "admissible": admissible
                     }),
                     "Automated benchmark scoring uses keyword matching v0.2; future evaluator should be stricter and ideally blind.",
                     Jsonb(["Run scenario variation", "Add raw transcript baseline for BR-002", "Create aggregate summaries only after meaningful variation"]),
