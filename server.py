@@ -21,6 +21,7 @@ KEEPALIVE_SEC = int(os.getenv("KEEPALIVE_INTERVAL", "240"))
 ENABLE_KEEPALIVE = os.getenv("ENABLE_KEEPALIVE", "true").lower() in ("1", "true", "yes")
 LAW_LABEL = "lawful-reflection"
 BOOT_TS = int(time.time())
+BUILD_TAG = "benchmark-loader-v2-2026-06-21"
 
 DAVE_RUNNER_API_KEY = os.getenv("DAVE_RUNNER_API_KEY", "").strip()
 OWNER_USER_ID = os.getenv("OWNER_USER_ID", "phil").strip().lower()
@@ -254,6 +255,7 @@ def continuity_row_to_item(row):
 def root():
     return ok({
         "service": "Dave Runner - PMEi Lawful Reflection Bridge",
+        "build_tag": BUILD_TAG,
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL),
@@ -1051,6 +1053,60 @@ def memory_search():
     except Exception as exc:
         return fail(f"Database error: {exc}", 500)
 
+
+def extract_section(text, name):
+    """Extract [SECTION_NAME] blocks from a benchmark definition."""
+    marker = f"[{name}]"
+    if not text or marker not in text:
+        return ""
+
+    chunk = text.split(marker, 1)[1].strip()
+    if "\n[" in chunk:
+        chunk = chunk.split("\n[", 1)[0].strip()
+    return chunk.strip()
+
+
+def parse_expected_terms(text):
+    """Parse expected terms from lines like: goal: website, redesign."""
+    expected = {}
+    if not text:
+        return expected
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+
+        key, values = line.split(":", 1)
+        terms = [item.strip() for item in values.split(",") if item.strip()]
+        if terms:
+            expected[key.strip()] = terms
+
+    return expected
+
+
+def fallback_expected_terms(benchmark_id, benchmark_text):
+    """Fallback scoring terms for legacy benchmark definitions without [EXPECTED_TERMS]."""
+    text = f"{benchmark_id}\n{benchmark_text}".lower()
+
+    if "website" in text or "webflow" in text or "seo" in text:
+        return {
+            "goal": ["website", "mobile-responsive", "business"],
+            "constraints": ["£3000", "6-week", "seo", "mobile", "colour scheme"],
+            "decisions": ["webflow", "content migration", "staging"],
+            "open_threads": ["hosting", "analytics", "revision"],
+            "next_action": ["choose hosting", "confirm revision"]
+        }
+
+    return {
+        "goal": ["kayak trailer", "road-legal", "family"],
+        "constraints": ["150kg", "£800", "UK", "foldable", "safe"],
+        "decisions": ["aluminium", "compact", "modular", "lighting"],
+        "open_threads": ["suspension", "lighting parts", "weight estimate"],
+        "next_action": ["choose suspension", "validate load"]
+    }
+
+
 @app.route("/memory/benchmark/run", methods=["POST"])
 def benchmark_run():
     auth_err = require_memory_auth()
@@ -1068,37 +1124,35 @@ def benchmark_run():
     model = (data.get("model") or OPENAI_MODEL).strip()
     if model == "default":
         model = OPENAI_MODEL
-
     save_result = bool(data.get("save_result", True))
 
-    continuity_packet = """
-Project: Build a kayak trailer.
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                CONTINUITY_SELECT + " WHERE user_id=%s AND save_id=%s LIMIT 1;",
+                (owner_user_id(), benchmark_id)
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        return fail(f"Benchmark definition lookup error: {exc}", 500)
 
-Goal:
-Design a safe, road-legal kayak trailer for family use.
+    if not row:
+        return fail(f"Benchmark definition not found: {benchmark_id}", 404)
 
-Constraints:
-- Maximum load: 150kg
-- Budget: £800
-- UK road legal
-- Foldable outriggers
-- Safe for family use
+    benchmark_def = continuity_row_to_item(row)
+    benchmark_text = (benchmark_def.get("context_shard") or "").strip()
 
-Decisions:
-- Aluminium frame
-- Compact modular design
-- Lighting system separate from folding mechanism
+    pmei_packet = extract_section(benchmark_text, "PMEI_PACKET")
+    baseline_input = extract_section(benchmark_text, "BASELINE_INPUT")
+    final_question = extract_section(benchmark_text, "QUESTION")
+    expected_terms_text = extract_section(benchmark_text, "EXPECTED_TERMS")
+    expected_terms = parse_expected_terms(expected_terms_text)
 
-Open Threads:
-- Suspension type not chosen
-- Lighting parts not chosen
-- Final weight estimate not confirmed
+    if not pmei_packet:
+        pmei_packet = benchmark_text
 
-Next Action:
-Choose suspension type and validate load rating.
-""".strip()
-
-    final_question = """
+    if not final_question:
+        final_question = """
 Reconstruct the current project state.
 
 Return:
@@ -1108,6 +1162,9 @@ Return:
 4. Open threads
 5. Next action
 """.strip()
+
+    if not expected_terms:
+        expected_terms = fallback_expected_terms(benchmark_id, benchmark_text)
 
     def ask_model(messages):
         response = openai_client.chat.completions.create(
@@ -1122,11 +1179,11 @@ Return:
         baseline_answer = ask_model([
             {
                 "role": "system",
-                "content": "Answer only from information provided in this chat. Do not invent missing project state."
+                "content": "Use only the supplied baseline input. Do not invent missing project state."
             },
             {
                 "role": "user",
-                "content": final_question
+                "content": f"Baseline input:\n{baseline_input}\n\n{final_question}"
             }
         ])
 
@@ -1137,19 +1194,11 @@ Return:
             },
             {
                 "role": "user",
-                "content": f"PMEi Continuity Packet:\n{continuity_packet}\n\n{final_question}"
+                "content": f"PMEi Continuity Packet:\n{pmei_packet}\n\n{final_question}"
             }
         ])
     except Exception as exc:
         return fail(f"Benchmark model call error: {exc}", 500)
-
-    expected_terms = {
-        "goal": ["kayak trailer", "road-legal", "family"],
-        "constraints": ["150kg", "£800", "UK", "foldable", "safe"],
-        "decisions": ["aluminium", "compact", "modular", "lighting"],
-        "open_threads": ["suspension", "lighting parts", "weight estimate"],
-        "next_action": ["choose suspension", "validate load"]
-    }
 
     def score_answer(answer):
         lower = (answer or "").lower()
@@ -1157,6 +1206,9 @@ Return:
         total = 0.0
 
         for category, terms in expected_terms.items():
+            if not terms:
+                scores[category] = 0.0
+                continue
             hits = sum(1 for term in terms if term.lower() in lower)
             category_score = round((hits / len(terms)) * 10, 2)
             scores[category] = category_score
@@ -1168,7 +1220,7 @@ Return:
     pmei_score, pmei_breakdown = score_answer(pmei_answer)
     improvement = round(pmei_score - baseline_score, 2)
 
-    run_id = f"BR-001-run-{int(time.time())}"
+    run_id = f"{benchmark_id}-run-{int(time.time())}"
 
     result = {
         "run_id": run_id,
@@ -1181,8 +1233,10 @@ Return:
         "pmei_breakdown": pmei_breakdown,
         "baseline_answer": baseline_answer,
         "pmei_answer": pmei_answer,
-        "continuity_packet": continuity_packet,
+        "baseline_input": baseline_input,
+        "continuity_packet": pmei_packet,
         "final_question": final_question,
+        "expected_terms": expected_terms,
         "status": "completed"
     }
 
@@ -1204,11 +1258,11 @@ Return:
                     RETURNING id, timestamp;
                 """, (
                     run_id, owner_user_id(), "pmei_benchmarks", 0.01,
-                    "BR-001 Benchmark Run Result",
+                    f"{benchmark_id} Benchmark Run Result",
                     f"Baseline scored {baseline_score}/50. PMEi scored {pmei_score}/50. Improvement: {improvement}.",
-                    "Executed BR-001 State Recovery Benchmark.",
+                    f"Executed benchmark {benchmark_id}.",
                     "Creates auditable evidence for whether PMEi continuity improves state reconstruction.",
-                    Jsonb(["Aggregate multiple BR-001 runs into BR-001-summary"]),
+                    Jsonb(["Review saved result", "Aggregate repeated runs when sample size is meaningful"]),
                     Jsonb([]),
                     "Measure PMEi state recovery performance.",
                     Jsonb(["same_model_comparison", "auditable_result", "no_overclaiming"]),
@@ -1217,11 +1271,11 @@ Return:
                         f"Baseline score: {baseline_score}",
                         f"PMEi score: {pmei_score}"
                     ]),
-                    Jsonb(["Repeat benchmark runs", "Add raw chat history comparison"]),
+                    Jsonb(["Repeat benchmark runs", "Add raw chat history comparison where applicable"]),
                     str(result),
-                    Jsonb(["BR-001", "benchmark_run", "state_recovery"]),
+                    Jsonb([benchmark_id, "benchmark_run", "state_recovery"]),
                     benchmark_id,
-                    Jsonb(["BR-001 benchmark execution completed"]),
+                    Jsonb([f"{benchmark_id} benchmark execution completed"]),
                     Jsonb(["Automated benchmark route executed and saved result"]),
                     Jsonb([]),
                     Jsonb({
@@ -1229,8 +1283,8 @@ Return:
                         "pmei_score": pmei_score,
                         "improvement": improvement
                     }),
-                    "Automated benchmark scoring uses keyword matching v0.1; future evaluator should be stricter.",
-                    Jsonb(["Run at least 10 trials", "Create BR-001-summary"]),
+                    "Automated benchmark scoring uses keyword matching v0.2; future evaluator should be stricter and ideally blind.",
+                    Jsonb(["Run scenario variation", "Add raw transcript baseline for BR-002", "Create aggregate summaries only after meaningful variation"]),
                     "lawful"
                 ))
                 saved_record_id, saved_timestamp = cur.fetchone()
