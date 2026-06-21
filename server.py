@@ -6,7 +6,7 @@ import os
 import time
 import threading
 import uuid
-import re
+
 import psycopg
 import requests
 from flask import Flask, jsonify, request
@@ -25,6 +25,7 @@ BUILD_TAG = "benchmark-loader-v2-2026-06-21"
 
 DAVE_RUNNER_API_KEY = os.getenv("DAVE_RUNNER_API_KEY", "").strip()
 OWNER_USER_ID = os.getenv("OWNER_USER_ID", "phil").strip().lower()
+CONTINUITY_PATHWAY_VERSION = os.getenv("CONTINUITY_PATHWAY_VERSION", "1.0.0").strip()
 
 try:
     from openai import OpenAI
@@ -256,6 +257,7 @@ def root():
     return ok({
         "service": "Dave Runner - PMEi Lawful Reflection Bridge",
         "build_tag": BUILD_TAG,
+        "cpv": CONTINUITY_PATHWAY_VERSION,
         "uptime": int(time.time()) - BOOT_TS,
         "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL),
@@ -1200,38 +1202,22 @@ Return:
     except Exception as exc:
         return fail(f"Benchmark model call error: {exc}", 500)
 
-
-    def normalize_text(text):
-        text = (text or "").lower()
-        text = re.sub(r"[^a-z0-9£\s-]", " ", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
-
-    def term_match(term, answer_text):
-        term = normalize_text(term)
-        answer_text = normalize_text(answer_text)
-
-        if term in answer_text:
-            return True
-
-        words = [w for w in term.split() if len(w) > 2]
-        if not words:
-            return False
-
-        hits = sum(1 for word in words if word in answer_text)
-        return hits >= max(1, len(words) // 2)
-
     def score_answer(answer):
+        lower = (answer or "").lower()
         scores = {}
         total = 0.0
 
         for category, terms in expected_terms.items():
-            hits = sum(1 for term in terms if term_match(term, answer))
-            category_score = round((hits / max(len(terms), 1)) * 10, 2)
+            if not terms:
+                scores[category] = 0.0
+                continue
+            hits = sum(1 for term in terms if term.lower() in lower)
+            category_score = round((hits / len(terms)) * 10, 2)
             scores[category] = category_score
             total += category_score
 
         return round(total, 2), scores
+
     baseline_score, baseline_breakdown = score_answer(baseline_answer)
     pmei_score, pmei_breakdown = score_answer(pmei_answer)
     improvement = round(pmei_score - baseline_score, 2)
@@ -1241,6 +1227,7 @@ Return:
     result = {
         "run_id": run_id,
         "benchmark_id": benchmark_id,
+        "cpv": CONTINUITY_PATHWAY_VERSION,
         "model": model,
         "baseline_score": baseline_score,
         "pmei_score": pmei_score,
@@ -1285,7 +1272,8 @@ Return:
                     Jsonb([
                         f"PMEi improvement: {improvement}",
                         f"Baseline score: {baseline_score}",
-                        f"PMEi score: {pmei_score}"
+                        f"PMEi score: {pmei_score}",
+                        f"CPV: {CONTINUITY_PATHWAY_VERSION}"
                     ]),
                     Jsonb(["Repeat benchmark runs", "Add raw chat history comparison where applicable"]),
                     str(result),
@@ -1297,7 +1285,8 @@ Return:
                     Jsonb({
                         "baseline_score": baseline_score,
                         "pmei_score": pmei_score,
-                        "improvement": improvement
+                        "improvement": improvement,
+                        "cpv": CONTINUITY_PATHWAY_VERSION
                     }),
                     "Automated benchmark scoring uses keyword matching v0.2; future evaluator should be stricter and ideally blind.",
                     Jsonb(["Run scenario variation", "Add raw transcript baseline for BR-002", "Create aggregate summaries only after meaningful variation"]),
