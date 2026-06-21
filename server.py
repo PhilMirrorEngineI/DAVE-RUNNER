@@ -1201,50 +1201,37 @@ Return:
         return fail(f"Benchmark model call error: {exc}", 500)
 
 
-def normalize_text(text):
-    text = (text or "").lower()
-    text = re.sub(r"[^a-z0-9£\s-]", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    def normalize_text(text):
+        text = (text or "").lower()
+        text = re.sub(r"[^a-z0-9£\s-]", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
 
+    def term_match(term, answer_text):
+        term = normalize_text(term)
+        answer_text = normalize_text(answer_text)
 
-def term_match(term, answer_text):
-    term = normalize_text(term)
-    answer_text = normalize_text(answer_text)
+        if term in answer_text:
+            return True
 
-    if term in answer_text:
-        return True
+        words = [w for w in term.split() if len(w) > 2]
+        if not words:
+            return False
 
-    words = [w for w in term.split() if len(w) > 2]
+        hits = sum(1 for word in words if word in answer_text)
+        return hits >= max(1, len(words) // 2)
 
-    if not words:
-        return False
+    def score_answer(answer):
+        scores = {}
+        total = 0.0
 
-    hits = sum(1 for word in words if word in answer_text)
+        for category, terms in expected_terms.items():
+            hits = sum(1 for term in terms if term_match(term, answer))
+            category_score = round((hits / max(len(terms), 1)) * 10, 2)
+            scores[category] = category_score
+            total += category_score
 
-    return hits >= max(1, len(words) // 2)
-
-
-def score_answer(answer):
-    scores = {}
-    total = 0.0
-
-    for category, terms in expected_terms.items():
-        hits = sum(
-            1 for term in terms
-            if term_match(term, answer)
-        )
-
-        category_score = round(
-            (hits / max(len(terms), 1)) * 10,
-            2
-        )
-
-        scores[category] = category_score
-        total += category_score
-
-    return round(total, 2), scores
-
+        return round(total, 2), scores
     baseline_score, baseline_breakdown = score_answer(baseline_answer)
     pmei_score, pmei_breakdown = score_answer(pmei_answer)
     improvement = round(pmei_score - baseline_score, 2)
