@@ -7,6 +7,9 @@ import time
 import threading
 import uuid
 import re
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import requests
@@ -27,6 +30,7 @@ BUILD_TAG = "benchmark-loader-v2-2026-06-21"
 DAVE_RUNNER_API_KEY = os.getenv("DAVE_RUNNER_API_KEY", "").strip()
 OWNER_USER_ID = os.getenv("OWNER_USER_ID", "phil").strip().lower()
 CONTINUITY_PATHWAY_VERSION = os.getenv("CONTINUITY_PATHWAY_VERSION", "1.0.0").strip()
+PMEI_HUMAN_APPROVAL_KEY = os.getenv("PMEI_HUMAN_APPROVAL_KEY", "").strip()
 
 try:
     from openai import OpenAI
@@ -79,6 +83,27 @@ def require_memory_auth():
     return None
 
 
+def require_human_approval_auth():
+    """Require the normal API key plus a separate human-approval secret.
+
+    This keeps a worker/provider that can call Dave Runner from being able to
+    manufacture its own human approval merely because it possesses the service
+    API key.
+    """
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    if not PMEI_HUMAN_APPROVAL_KEY:
+        return fail("Human approval key not configured", 503)
+
+    supplied = request.headers.get("X-PMEI-HUMAN-KEY", "").strip()
+    if supplied != PMEI_HUMAN_APPROVAL_KEY:
+        return fail("Human approval required", 403)
+
+    return None
+
+
 def owner_user_id():
     return OWNER_USER_ID
 
@@ -98,6 +123,31 @@ def as_json_list(value):
 
 def as_json_object(value):
     return value if isinstance(value, dict) else {}
+
+
+def stable_json_hash(value):
+    """Return a deterministic SHA-256 for JSON-compatible payloads."""
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def audit_action_event(cur, event_type, actor, details=None, action_id=None, decision_id=None):
+    cur.execute(
+        """
+        INSERT INTO action_audit_events (action_id, decision_id, event_type, actor, details)
+        VALUES (%s,%s,%s,%s,%s);
+        """,
+        (action_id, decision_id, event_type, actor, Jsonb(details or {}))
+    )
 
 
 def add_column_if_missing(cur, table, col, ddl):
@@ -199,6 +249,72 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_continuity_active_constraints ON continuity_records USING GIN (active_constraints);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_continuity_learning_events ON continuity_records USING GIN (learning_events);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_continuity_successful_patterns ON continuity_records USING GIN (successful_patterns);")
+
+        # M3 service-boundary authority proof objects. These are intentionally
+        # separate from continuity_records so test execution cannot accidentally
+        # mutate governed continuity.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS human_decisions (
+              decision_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              subject_type TEXT NOT NULL,
+              subject_id TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              decided_by TEXT NOT NULL,
+              rationale TEXT,
+              approved_payload_hash TEXT NOT NULL,
+              decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              expires_at TIMESTAMPTZ,
+              provenance JSONB NOT NULL DEFAULT '{}'::jsonb
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS authorised_actions (
+              action_id TEXT PRIMARY KEY,
+              decision_id TEXT NOT NULL REFERENCES human_decisions(decision_id),
+              user_id TEXT NOT NULL,
+              action_type TEXT NOT NULL,
+              mutation_class TEXT NOT NULL,
+              subject_type TEXT NOT NULL,
+              subject_id TEXT NOT NULL,
+              action_payload JSONB NOT NULL,
+              payload_hash TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'authorised',
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              expires_at TIMESTAMPTZ,
+              executed_at TIMESTAMPTZ
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS action_test_state (
+              state_key TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              value JSONB NOT NULL DEFAULT '{}'::jsonb,
+              version INTEGER NOT NULL DEFAULT 0,
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              last_action_id TEXT
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS action_audit_events (
+              event_id BIGSERIAL PRIMARY KEY,
+              action_id TEXT,
+              decision_id TEXT,
+              event_type TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              details JSONB NOT NULL DEFAULT '{}'::jsonb,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_authorised_actions_decision ON authorised_actions (decision_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_authorised_actions_status ON authorised_actions (status, expires_at);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_action_audit_action ON action_audit_events (action_id, created_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_action_audit_decision ON action_audit_events (decision_id, created_at DESC);")
+
         conn.commit()
 
 
@@ -264,6 +380,7 @@ def root():
         "openai_enabled": bool(openai_client),
         "db_connected": bool(DATABASE_URL),
         "auth_configured": bool(DAVE_RUNNER_API_KEY),
+        "human_approval_auth_configured": bool(PMEI_HUMAN_APPROVAL_KEY),
         "owner_user_id": OWNER_USER_ID
     })
 
@@ -277,7 +394,12 @@ def health():
         db_ok = True
     except Exception:
         db_ok = False
-    return ok({"lawful": True, "db_connected": db_ok, "auth_configured": bool(DAVE_RUNNER_API_KEY)})
+    return ok({
+        "lawful": True,
+        "db_connected": db_ok,
+        "auth_configured": bool(DAVE_RUNNER_API_KEY),
+        "human_approval_auth_configured": bool(PMEI_HUMAN_APPROVAL_KEY)
+    })
 
 
 @app.route("/privacy")
@@ -339,6 +461,449 @@ def reflect():
         "drift_clamped": drift_clamped,
         "reflection_excerpt": (data.get("content") or "")[:500]
     })
+
+
+# -----------------------------------------------------------------------------
+# M3 SERVICE-BOUNDARY AUTHORITY PROOF
+# -----------------------------------------------------------------------------
+
+
+def get_authorised_action_for_update(cur, action_id):
+    cur.execute(
+        """
+        SELECT
+            a.action_id, a.decision_id, a.user_id, a.action_type,
+            a.mutation_class, a.subject_type, a.subject_id,
+            a.action_payload, a.payload_hash, a.status,
+            a.created_at, a.expires_at, a.executed_at,
+            d.decision, d.decided_by, d.approved_payload_hash,
+            d.decided_at, d.expires_at
+        FROM authorised_actions a
+        JOIN human_decisions d ON d.decision_id = a.decision_id
+        WHERE a.user_id=%s AND a.action_id=%s
+        FOR UPDATE;
+        """,
+        (owner_user_id(), action_id)
+    )
+    return cur.fetchone()
+
+
+def validate_authorised_action(cur, action_id, requested_action, mutation_class, action_payload):
+    """Validate an exact human-authorised one-time action.
+
+    The inference model/provider is intentionally not trusted for permission.
+    Permission is derived only from persisted decision/action state.
+    """
+    row = get_authorised_action_for_update(cur, action_id)
+    if not row:
+        return False, "authorised_action_not_found", None
+
+    (
+        stored_action_id, decision_id, user_id, action_type,
+        stored_mutation_class, subject_type, subject_id,
+        stored_payload, payload_hash, status,
+        created_at, action_expires_at, executed_at,
+        decision, decided_by, approved_payload_hash,
+        decided_at, decision_expires_at
+    ) = row
+
+    now = utc_now()
+    supplied_hash = stable_json_hash(action_payload)
+
+    checks = [
+        (decision == "approved", "human_decision_not_approved"),
+        (decided_by == owner_user_id(), "decision_not_from_human_authority"),
+        (status == "authorised", "action_not_authorised_or_already_used"),
+        (executed_at is None, "action_already_executed"),
+        (action_type == requested_action, "action_type_mismatch"),
+        (stored_mutation_class == mutation_class, "mutation_class_mismatch"),
+        (payload_hash == supplied_hash, "action_payload_hash_mismatch"),
+        (approved_payload_hash == payload_hash, "decision_payload_hash_mismatch"),
+        (action_expires_at is None or action_expires_at > now, "authorised_action_expired"),
+        (decision_expires_at is None or decision_expires_at > now, "human_decision_expired")
+    ]
+
+    for passed, reason in checks:
+        if not passed:
+            return False, reason, {
+                "action_id": stored_action_id,
+                "decision_id": decision_id,
+                "subject_type": subject_type,
+                "subject_id": subject_id
+            }
+
+    return True, "authorised", {
+        "action_id": stored_action_id,
+        "decision_id": decision_id,
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "payload_hash": payload_hash
+    }
+
+
+@app.route("/memory/action/authorize", methods=["POST"])
+def action_authorize():
+    """Create an exact human-approved, one-time action.
+
+    This endpoint requires BOTH X-API-KEY and X-PMEI-HUMAN-KEY.
+    Workers/providers should never receive the human approval key.
+    """
+    auth_err = require_human_approval_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    action_type = (data.get("action_type") or "").strip()
+    mutation_class = (data.get("mutation_class") or "").strip()
+    subject_type = (data.get("subject_type") or "").strip()
+    subject_id = (data.get("subject_id") or "").strip()
+    rationale = (data.get("rationale") or "").strip()
+    action_payload = data.get("action_payload")
+
+    if not action_type:
+        return fail("action_type required", 400)
+    if not mutation_class:
+        return fail("mutation_class required", 400)
+    if not subject_type:
+        return fail("subject_type required", 400)
+    if not subject_id:
+        return fail("subject_id required", 400)
+    if not isinstance(action_payload, dict):
+        return fail("action_payload must be a JSON object", 400)
+
+    # Keep the first implementation deliberately narrow.
+    if action_type != "m3_test_mutation" or mutation_class != "test_state_write":
+        return fail("Only the isolated M3 test mutation is authorisable in this proof build", 400)
+
+    expires_in_seconds = data.get("expires_in_seconds", 900)
+    try:
+        expires_in_seconds = int(expires_in_seconds)
+    except Exception:
+        return fail("expires_in_seconds must be an integer", 400)
+
+    expires_in_seconds = min(max(expires_in_seconds, 60), 3600)
+    expires_at = utc_now() + timedelta(seconds=expires_in_seconds)
+
+    payload_hash = stable_json_hash(action_payload)
+    decision_id = f"dec-{uuid.uuid4()}"
+    action_id = f"act-{uuid.uuid4()}"
+    user = owner_user_id()
+
+    provenance = {
+        "human_authority": user,
+        "source": "Dave Runner /memory/action/authorize",
+        "authority_class": "human_approved",
+        "runtime_boundary": "M3 service proof"
+    }
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO human_decisions (
+                    decision_id, user_id, subject_type, subject_id, decision,
+                    decided_by, rationale, approved_payload_hash, expires_at, provenance
+                )
+                VALUES (%s,%s,%s,%s,'approved',%s,%s,%s,%s,%s);
+                """,
+                (
+                    decision_id, user, subject_type, subject_id, user,
+                    rationale, payload_hash, expires_at, Jsonb(provenance)
+                )
+            )
+
+            cur.execute(
+                """
+                INSERT INTO authorised_actions (
+                    action_id, decision_id, user_id, action_type, mutation_class,
+                    subject_type, subject_id, action_payload, payload_hash,
+                    status, expires_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'authorised',%s);
+                """,
+                (
+                    action_id, decision_id, user, action_type, mutation_class,
+                    subject_type, subject_id, Jsonb(action_payload), payload_hash,
+                    expires_at
+                )
+            )
+
+            audit_action_event(
+                cur,
+                event_type="human_authorised",
+                actor=user,
+                action_id=action_id,
+                decision_id=decision_id,
+                details={
+                    "action_type": action_type,
+                    "mutation_class": mutation_class,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "payload_hash": payload_hash,
+                    "expires_at": expires_at.isoformat()
+                }
+            )
+            conn.commit()
+
+        return ok({
+            "decision_id": decision_id,
+            "action_id": action_id,
+            "decision": "approved",
+            "decided_by": user,
+            "action_type": action_type,
+            "mutation_class": mutation_class,
+            "subject_type": subject_type,
+            "subject_id": subject_id,
+            "payload_hash": payload_hash,
+            "expires_at": expires_at.isoformat(),
+            "status": "authorised"
+        })
+    except Exception as exc:
+        return fail(f"Authorization persistence error: {exc}", 500)
+
+
+@app.route("/memory/action/test", methods=["POST"])
+def action_test_mutation():
+    """Attempt the isolated M3 test mutation.
+
+    This route intentionally requires only the normal Dave Runner API key, so an
+    external worker/provider can call it. The mutation still cannot occur unless
+    an exact, unused, unexpired human-authorised action exists.
+    """
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    action_id = (data.get("action_id") or "").strip()
+    action_payload = data.get("action_payload")
+    actor = (data.get("actor") or "external_worker").strip() or "external_worker"
+
+    if not isinstance(action_payload, dict):
+        action_payload = {}
+
+    state_key = str(action_payload.get("state_key") or "").strip()
+    value = action_payload.get("value")
+
+    if not action_id:
+        try:
+            with get_db() as conn, conn.cursor() as cur:
+                audit_action_event(
+                    cur,
+                    event_type="mutation_denied",
+                    actor=actor,
+                    details={
+                        "reason": "action_id_required",
+                        "requested_action": "m3_test_mutation",
+                        "mutation_class": "test_state_write",
+                        "payload_hash": stable_json_hash(action_payload)
+                    }
+                )
+                conn.commit()
+        except Exception:
+            pass
+        return fail("Protected mutation denied: action_id required", 403, reason="action_id_required")
+
+    if not state_key:
+        return fail("action_payload.state_key required", 400)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            allowed, reason, authority = validate_authorised_action(
+                cur,
+                action_id=action_id,
+                requested_action="m3_test_mutation",
+                mutation_class="test_state_write",
+                action_payload=action_payload
+            )
+
+            if not allowed:
+                decision_id = (authority or {}).get("decision_id")
+                audit_action_event(
+                    cur,
+                    event_type="mutation_denied",
+                    actor=actor,
+                    action_id=action_id,
+                    decision_id=decision_id,
+                    details={
+                        "reason": reason,
+                        "requested_action": "m3_test_mutation",
+                        "mutation_class": "test_state_write",
+                        "payload_hash": stable_json_hash(action_payload)
+                    }
+                )
+                conn.commit()
+                return fail(
+                    f"Protected mutation denied: {reason}",
+                    403,
+                    reason=reason,
+                    action_id=action_id
+                )
+
+            cur.execute(
+                """
+                INSERT INTO action_test_state (
+                    state_key, user_id, value, version, updated_at, last_action_id
+                )
+                VALUES (%s,%s,%s,1,NOW(),%s)
+                ON CONFLICT (state_key) DO UPDATE SET
+                    value=EXCLUDED.value,
+                    version=action_test_state.version + 1,
+                    updated_at=NOW(),
+                    last_action_id=EXCLUDED.last_action_id
+                RETURNING state_key, value, version, updated_at, last_action_id;
+                """,
+                (state_key, owner_user_id(), Jsonb(value), action_id)
+            )
+            state_row = cur.fetchone()
+
+            cur.execute(
+                """
+                UPDATE authorised_actions
+                SET status='executed', executed_at=NOW()
+                WHERE action_id=%s;
+                """,
+                (action_id,)
+            )
+
+            audit_action_event(
+                cur,
+                event_type="mutation_executed",
+                actor=actor,
+                action_id=action_id,
+                decision_id=authority.get("decision_id"),
+                details={
+                    "state_key": state_row[0],
+                    "version": state_row[2],
+                    "payload_hash": authority.get("payload_hash"),
+                    "subject_type": authority.get("subject_type"),
+                    "subject_id": authority.get("subject_id")
+                }
+            )
+            conn.commit()
+
+        return ok({
+            "executed": True,
+            "action_id": action_id,
+            "decision_id": authority.get("decision_id"),
+            "state": {
+                "state_key": state_row[0],
+                "value": state_row[1],
+                "version": state_row[2],
+                "updated_at": str(state_row[3]),
+                "last_action_id": state_row[4]
+            }
+        })
+    except Exception as exc:
+        return fail(f"Protected mutation error: {exc}", 500)
+
+
+@app.route("/memory/action/test/state", methods=["POST"])
+def action_test_state_get():
+    """Independently retrieve isolated test state after allow/deny attempts."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    state_key = (data.get("state_key") or "").strip()
+    if not state_key:
+        return fail("state_key required", 400)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT state_key, value, version, updated_at, last_action_id
+                FROM action_test_state
+                WHERE user_id=%s AND state_key=%s;
+                """,
+                (owner_user_id(), state_key)
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return ok({"found": False, "state_key": state_key})
+
+        return ok({
+            "found": True,
+            "state": {
+                "state_key": row[0],
+                "value": row[1],
+                "version": row[2],
+                "updated_at": str(row[3]),
+                "last_action_id": row[4]
+            }
+        })
+    except Exception as exc:
+        return fail(f"Test-state retrieval error: {exc}", 500)
+
+
+@app.route("/memory/action/audit", methods=["POST"])
+def action_audit_get():
+    """Retrieve append-only evidence for M3 allow/deny tests."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    action_id = (data.get("action_id") or "").strip()
+    limit = min(max(int(data.get("limit") or 50), 1), 200)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            if action_id:
+                cur.execute(
+                    """
+                    SELECT event_id, action_id, decision_id, event_type, actor, details, created_at
+                    FROM action_audit_events
+                    WHERE action_id=%s
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                    """,
+                    (action_id, limit)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT event_id, action_id, decision_id, event_type, actor, details, created_at
+                    FROM action_audit_events
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                    """,
+                    (limit,)
+                )
+            rows = cur.fetchall()
+
+        return ok({
+            "count": len(rows),
+            "items": [
+                {
+                    "event_id": row[0],
+                    "action_id": row[1],
+                    "decision_id": row[2],
+                    "event_type": row[3],
+                    "actor": row[4],
+                    "details": row[5] or {},
+                    "created_at": str(row[6])
+                }
+                for row in rows
+            ]
+        })
+    except Exception as exc:
+        return fail(f"Action audit retrieval error: {exc}", 500)
 
 
 @app.route("/memory/save", methods=["POST"])
