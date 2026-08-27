@@ -2413,6 +2413,137 @@ Rules:
     ))
 
 
+
+# -----------------------------------------------------------------------------
+# DETERMINISTIC WORKER ORCHESTRATION HTTP BRIDGE
+# -----------------------------------------------------------------------------
+
+def orchestration_payload(value):
+    """Return a JSON-safe representation of an orchestration contract/state object."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "dict"):
+        return value.dict()
+    if hasattr(value, "__dict__"):
+        return {
+            key: orchestration_payload(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [orchestration_payload(item) for item in value]
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def call_orchestration_method(method_names, *args):
+    """Call the first compatible engine method from a narrow compatibility set."""
+    last_type_error = None
+    for method_name in method_names:
+        method = getattr(orchestration_engine, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method(*args)
+        except TypeError as exc:
+            last_type_error = exc
+            continue
+
+    if last_type_error is not None:
+        raise last_type_error
+    raise AttributeError(
+        "OrchestrationEngine does not expose any compatible method: "
+        + ", ".join(method_names)
+    )
+
+
+def build_orchestration_contract(contract_type, data):
+    """Construct a contract without weakening validation in contracts.py."""
+    try:
+        return contract_type(**data)
+    except TypeError:
+        # Dataclass-style and Pydantic-style contracts both normally accept
+        # keyword arguments. If a contract intentionally accepts a single
+        # payload object, preserve that implementation too.
+        return contract_type(data)
+
+
+@app.route("/orchestration/job/create", methods=["POST"])
+def orchestration_job_create():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    try:
+        job = build_orchestration_contract(OrchestrationJob, data)
+        result = call_orchestration_method(
+            ("create_job", "submit_job", "register_job"),
+            job
+        )
+        return ok(orchestration_payload(result if result is not None else job))
+    except (TypeError, ValueError, KeyError) as exc:
+        return fail(f"Invalid orchestration job: {exc}", 400)
+    except Exception as exc:
+        return fail(f"Orchestration job creation error: {exc}", 500)
+
+
+@app.route("/orchestration/job/<job_id>", methods=["GET"])
+def orchestration_job_get(job_id):
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return fail("job_id required", 400)
+
+    try:
+        result = call_orchestration_method(
+            ("get_job", "job_status", "get_state"),
+            job_id
+        )
+        if result is None:
+            return fail("Orchestration job not found", 404)
+        return ok(orchestration_payload(result))
+    except (KeyError, LookupError):
+        return fail("Orchestration job not found", 404)
+    except Exception as exc:
+        return fail(f"Orchestration job retrieval error: {exc}", 500)
+
+
+@app.route("/orchestration/result/submit", methods=["POST"])
+def orchestration_result_submit():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    try:
+        worker_result = build_orchestration_contract(WorkerResult, data)
+        result = call_orchestration_method(
+            ("submit_result", "record_result", "accept_result"),
+            worker_result
+        )
+        return ok(orchestration_payload(result if result is not None else worker_result))
+    except (TypeError, ValueError, KeyError) as exc:
+        return fail(f"Invalid worker result: {exc}", 400)
+    except Exception as exc:
+        return fail(f"Orchestration result submission error: {exc}", 500)
+
+
+
 @app.route("/memory/export", methods=["POST"])
 def memory_export():
     auth_err = require_memory_auth()
