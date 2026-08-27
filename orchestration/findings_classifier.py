@@ -211,6 +211,7 @@ class DeterministicFindingsClassifier:
         provider: str = "",
         model: str = "",
         evidence_status: str = "SUPPORTED",
+        originator_type: str = "WORKER",
     ) -> FindingsClassification:
 
         claim = str(
@@ -244,7 +245,7 @@ class DeterministicFindingsClassifier:
 
         finding = CandidateFinding(
             claim=claim,
-            originator_type="WORKER",
+            originator_type=originator_type,
             evidence_status=evidence_status,
             verification_required=True,
             falsification_path=(
@@ -302,3 +303,4 @@ class DeterministicFindingsClassifier:
 
 def build_findings_classifier() -> DeterministicFindingsClassifier:
     return DeterministicFindingsClassifier()
+
