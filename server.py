@@ -16,6 +16,8 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from psycopg.types.json import Jsonb
+from orchestration.contracts import OrchestrationJob, WorkerResult
+from orchestration.engine import OrchestrationEngine
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -40,6 +42,16 @@ except Exception:
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+
+# PMEi deterministic worker orchestration.
+#
+# Initial integration is deliberately process-local.
+# The orchestration engine owns deterministic worker state transitions only.
+# It does not persist continuity, perform worker reasoning, manufacture human
+# approval, or implement candidate code automatically.
+#
+# Persistence and durable orchestration state remain separate concerns.
+orchestration_engine = OrchestrationEngine()
 
 
 def ok(data=None, **extra):
