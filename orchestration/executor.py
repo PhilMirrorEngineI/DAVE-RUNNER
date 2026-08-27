@@ -50,6 +50,10 @@ from .worker_packet import (
     PMEiWorkerPacketBuilder,
     build_worker_packet_builder,
 )
+from .output_validator import (
+    WorkerOutputValidator,
+    build_output_validator,
+)
 from .providers import (
     BaseProvider,
     ProviderRequest,
@@ -409,6 +413,12 @@ class WorkerExecutor:
             build_worker_packet_builder(
                 max_supported=4
             )
+        )
+
+        # Deterministic validation of provider work product.
+        # Validation cannot mutate orchestration state or grant authority.
+        self.output_validator = (
+            build_output_validator()
         )
     # -------------------------------------------------------------------------
     # PROMPT
@@ -887,6 +897,58 @@ Return only the evidence-bounded work product for your active worker role.
                         ),
                 },
             )
+        validation = self.output_validator.validate(
+            output_text=response.output_text,
+            worker_packet_text=worker_packet.rendered_text,
+        )
+
+        if not validation.ok:
+            return WorkerExecution(
+                job_id=job_id,
+                worker_role=active_worker,
+                ok=False,
+                provider=response.provider,
+                model=response.model,
+                output_text=response.output_text,
+                error=(
+                    "Deterministic worker output validation rejected "
+                    "the provider work product."
+                ),
+                metadata={
+                    **response.metadata,
+                    "validation_status": validation.status,
+                    "validation_issue_count": len(validation.issues),
+                    "validation_issues": [
+                        {
+                            "rule_id": issue.rule_id,
+                            "severity": issue.severity,
+                            "claim": issue.claim,
+                            "reason": issue.reason,
+                        }
+                        for issue in validation.issues
+                    ],
+                    "orchestration_state_changed": False,
+                    "transition_authority": False,
+                    "evidence_bounded": True,
+                    "pmei_retrieval_ok": bool(
+                        evidence_packet.get(
+                            "retrieval_ok",
+                            False,
+                        )
+                    ),
+                    "pmei_evidence_count": evidence_packet.get(
+                        "evidence_count",
+                        0,
+                    ),
+                    "pmei_records_received": evidence_packet.get(
+                        "records_received",
+                        0,
+                    ),
+                    "pmei_route": evidence_packet.get(
+                        "route"
+                    ),
+                },
+            )
 
         return WorkerExecution(
             job_id=job_id,
@@ -941,6 +1003,62 @@ Return only the evidence-bounded work product for your active worker role.
                     ),
             },
         )
+        return WorkerExecution(
+            job_id=job_id,
+
+            worker_role=active_worker,
+
+            ok=response.ok,
+
+            provider=response.provider,
+
+            model=response.model,
+
+            output_text=response.output_text,
+
+            error=response.error,
+
+            metadata={
+                **response.metadata,
+
+                "orchestration_state_changed":
+                    False,
+
+                "transition_authority":
+                    False,
+
+                "evidence_bounded":
+                    True,
+
+                "pmei_retrieval_ok":
+                    bool(
+                        evidence_packet.get(
+                            "retrieval_ok",
+                            False,
+                        )
+                    ),
+
+                "pmei_evidence_count":
+                    evidence_packet.get(
+                        "evidence_count",
+                        0,
+                    ),
+
+                "pmei_records_received":
+                    evidence_packet.get(
+                        "records_received",
+                        0,
+                    ),
+
+                "pmei_route":
+                    evidence_packet.get(
+                        "route"
+                    ),
+            },
+        )
+
+
+
 
 
 
