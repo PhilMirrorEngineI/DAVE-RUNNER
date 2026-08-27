@@ -1,4 +1,4 @@
-"""
+﻿"""
 PMEi GOVERNED WORKER EXECUTOR
 
 Purpose
@@ -25,6 +25,15 @@ The executor DOES NOT:
 
 Provider output remains candidate work until another governed layer
 explicitly converts/submits it as a WorkerResult.
+
+Evidence rule
+-------------
+Workers must distinguish supplied evidence from inference.
+
+A worker may not claim that a test passed, a behaviour was observed,
+a defect was reproduced, code was executed, deployment occurred, or a
+system property was verified unless that evidence is present in the
+bounded context supplied to that worker.
 """
 
 from __future__ import annotations
@@ -33,6 +42,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from .engine import OrchestrationEngine
+from .evidence_adapter import (
+    PMEiEvidenceAdapter,
+    build_evidence_adapter,
+)
+from .worker_packet import (
+    PMEiWorkerPacketBuilder,
+    build_worker_packet_builder,
+)
 from .providers import (
     BaseProvider,
     ProviderRequest,
@@ -59,7 +76,6 @@ class WorkerExecution:
 
     job_id: str
     worker_role: str
-
     ok: bool
 
     provider: str = ""
@@ -93,11 +109,50 @@ class NoActiveWorkerError(WorkerExecutionError):
 
 
 # =============================================================================
+# COMMON EVIDENCE CONTRACT
+# =============================================================================
+
+COMMON_EVIDENCE_CONTRACT = """
+EVIDENCE DISCIPLINE
+
+Use only information present in CURRENT TASK and BOUNDED CONTEXT.
+
+Do not claim any of the following unless the bounded context contains
+explicit evidence for it:
+- a test was run;
+- a test passed or failed;
+- code executed;
+- a defect was reproduced;
+- a system behaved in a particular way;
+- a deployment happened;
+- a file was changed;
+- a benchmark result was observed;
+- a performance measurement was obtained.
+
+If information is missing, label it:
+UNVERIFIED
+
+If you infer something, label it:
+INFERENCE
+
+If the supplied context directly supports something, label it:
+SUPPORTED
+
+Do not turn recommendations into observations.
+Do not turn plausible behaviour into evidence.
+Do not fabricate telemetry, measurements, outcomes, or test results.
+
+Your output must describe only the work product available from the
+supplied evidence.
+""".strip()
+
+
+# =============================================================================
 # WORKER PROMPTS
 # =============================================================================
 
 WORKER_SYSTEM_PROMPTS = {
-    "engineering": """
+    "engineering": f"""
 You are the Engineering worker inside a governed PMEi orchestration system.
 
 Your function is technical analysis and engineering disposition.
@@ -120,10 +175,28 @@ You may not:
 - write PMEi continuity;
 - mutate orchestration state.
 
-Return only Engineering work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return Engineering work product using this structure:
+
+SUPPORTED EVIDENCE
+Only directly supported facts from the supplied task/context.
+
+ENGINEERING ANALYSIS
+Your bounded technical analysis.
+
+UNVERIFIED
+Anything that would require inspection, execution, testing, measurement,
+or additional evidence.
+
+BUILDER REQUIREMENT
+A bounded implementation requirement if one is justified.
+If no build requirement is justified, state that explicitly.
+
+Do not claim tests or observations occurred unless supplied as evidence.
 """.strip(),
 
-    "builder": """
+    "builder": f"""
 You are the Builder worker inside a governed PMEi orchestration system.
 
 Your function is bounded implementation work.
@@ -144,10 +217,26 @@ You may not:
 - mutate orchestration state;
 - claim deployment occurred unless independently supplied as evidence.
 
-Return only Builder candidate work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return Builder work product using this structure:
+
+SUPPORTED INPUT
+The requirement/evidence supplied to you.
+
+CANDIDATE IMPLEMENTATION
+Only the candidate work you produced.
+
+UNVERIFIED
+Anything not executed or independently checked.
+
+HANDOFF NOTES
+What a verifier would need to inspect.
+
+Do not claim the candidate works unless evidence supplied to you proves it.
 """.strip(),
 
-    "knobhead": """
+    "knobhead": f"""
 You are the Knobhead adversarial verification worker inside a governed
 PMEi orchestration system.
 
@@ -155,7 +244,7 @@ Your function is adversarial verification of the supplied candidate
 against the bounded requirement and evidence.
 
 You may:
-- inspect the candidate;
+- inspect the supplied candidate;
 - identify defects;
 - identify contradictions;
 - identify missing evidence;
@@ -172,10 +261,30 @@ You may not:
 - write PMEi continuity;
 - mutate orchestration state.
 
-Return only adversarial verification work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return verification work product using this structure:
+
+SUPPORTED EVIDENCE
+Evidence actually supplied to you.
+
+ADVERSARIAL FINDINGS
+Defects, contradictions, or concerns supported by that evidence.
+
+UNVERIFIED
+Anything that cannot be established from supplied evidence.
+
+VERIFICATION DISPOSITION
+State only one of:
+- ACCEPT_CANDIDATE
+- REVISE_CANDIDATE
+- INSUFFICIENT_EVIDENCE
+
+This disposition is a candidate verification opinion only.
+It does not advance orchestration state by itself.
 """.strip(),
 
-    "governance": """
+    "governance": f"""
 You are the Governance worker inside a governed PMEi orchestration system.
 
 Your function is governance analysis.
@@ -195,10 +304,12 @@ You may not:
 - write PMEi continuity;
 - mutate orchestration state.
 
-Return only Governance work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return only evidence-bounded Governance work product.
 """.strip(),
 
-    "architecture": """
+    "architecture": f"""
 You are the Architecture worker inside a governed PMEi orchestration system.
 
 Your function is architectural analysis.
@@ -217,10 +328,12 @@ You may not:
 - write PMEi continuity;
 - mutate orchestration state.
 
-Return only Architecture work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return only evidence-bounded Architecture work product.
 """.strip(),
 
-    "findings": """
+    "findings": f"""
 You are the Findings worker inside a governed PMEi orchestration system.
 
 Your function is evidence-oriented findings analysis.
@@ -239,10 +352,12 @@ You may not:
 - write PMEi continuity;
 - mutate orchestration state.
 
-Return only Findings work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return only evidence-bounded Findings work product.
 """.strip(),
 
-    "steward": """
+    "steward": f"""
 You are the Steward worker inside a governed PMEi orchestration system.
 
 Your function is continuity and structural stewardship analysis.
@@ -260,7 +375,9 @@ You may not:
 - write PMEi continuity automatically;
 - mutate orchestration state.
 
-Return only Steward work product.
+{COMMON_EVIDENCE_CONTRACT}
+
+Return only evidence-bounded Steward work product.
 """.strip(),
 }
 
@@ -280,6 +397,7 @@ class WorkerExecutor:
         self,
         engine: OrchestrationEngine,
         provider: BaseProvider | None = None,
+        evidence_adapter: PMEiEvidenceAdapter | None = None,
     ) -> None:
 
         self.engine = engine
@@ -290,6 +408,24 @@ class WorkerExecutor:
             else build_provider()
         )
 
+        # Read-only PMEi evidence preparation happens before inference.
+        # The adapter does not write continuity, choose workers, or mutate
+        # orchestration state.
+        self.evidence_adapter = (
+            evidence_adapter
+            if evidence_adapter is not None
+            else build_evidence_adapter(
+                max_evidence=3
+            )
+        )
+
+        # Deterministic PMEi evidence-to-worker packet preparation.
+        # This occurs before optional provider inference.
+        self.worker_packet_builder = (
+            build_worker_packet_builder(
+                max_supported=4
+            )
+        )
     # -------------------------------------------------------------------------
     # PROMPT
     # -------------------------------------------------------------------------
@@ -315,8 +451,99 @@ Do not choose the next worker.
 Do not manufacture human approval.
 Do not write PMEi continuity.
 Do not mutate orchestration state.
-Return only the work product for your active worker role.
+
+{COMMON_EVIDENCE_CONTRACT}
+
+Return only the evidence-bounded work product for your active worker role.
 """.strip()
+
+    # -------------------------------------------------------------------------
+    # READ-ONLY PMEI EVIDENCE PREPARATION
+    # -------------------------------------------------------------------------
+
+    def prepare_evidence(
+        self,
+        question: str,
+    ) -> Dict[str, Any]:
+        """
+        Retrieve and rank a small PMEi evidence packet before model inference.
+
+        Retrieval failure does not mutate orchestration state. The failure is
+        represented explicitly in the bounded context so the worker can mark
+        missing information UNVERIFIED instead of inventing evidence.
+        """
+
+        try:
+            packet = self.evidence_adapter.prepare(
+                question
+            )
+        except Exception as exc:
+            return {
+                "retrieval_ok":
+                    False,
+
+                "question":
+                    question,
+
+                "query":
+                    "",
+
+                "records_received":
+                    0,
+
+                "evidence_count":
+                    0,
+
+                "route":
+                    None,
+
+                "evidence":
+                    [],
+
+                "error":
+                    (
+                        "Evidence preparation failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+            }
+
+        return {
+            "retrieval_ok":
+                bool(
+                    packet.retrieval_ok
+                ),
+
+            "question":
+                packet.question,
+
+            "query":
+                packet.query,
+
+            "records_received":
+                packet.records_received,
+
+            "evidence_count":
+                packet.evidence_count,
+
+            "route":
+                (
+                    packet.transport.get(
+                        "route"
+                    )
+                    if isinstance(
+                        packet.transport,
+                        dict,
+                    )
+                    else None
+                ),
+
+            "evidence":
+                packet.evidence,
+
+            "error":
+                packet.error,
+        }
+
 
     # -------------------------------------------------------------------------
     # CONTEXT
@@ -325,11 +552,17 @@ Return only the work product for your active worker role.
     def build_context(
         self,
         job_id: str,
+        evidence_packet: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
 
         state = self.engine.get_state(
             job_id
         )
+
+        if evidence_packet is None:
+            evidence_packet = self.prepare_evidence(
+                state.job.task
+            )
 
         history = []
 
@@ -403,6 +636,83 @@ Return only the work product for your active worker role.
                 "history":
                     history,
             },
+
+            "pmei_evidence": {
+                "retrieval_ok":
+                    bool(
+                        evidence_packet.get(
+                            "retrieval_ok",
+                            False,
+                        )
+                    ),
+
+                "query":
+                    evidence_packet.get(
+                        "query",
+                        "",
+                    ),
+
+                "records_received":
+                    evidence_packet.get(
+                        "records_received",
+                        0,
+                    ),
+
+                "evidence_count":
+                    evidence_packet.get(
+                        "evidence_count",
+                        0,
+                    ),
+
+                "route":
+                    evidence_packet.get(
+                        "route"
+                    ),
+
+                "items":
+                    (
+                        evidence_packet.get(
+                            "evidence"
+                        )
+                        if isinstance(
+                            evidence_packet.get(
+                                "evidence"
+                            ),
+                            list,
+                        )
+                        else
+                        []
+                    ),
+
+                "error":
+                    evidence_packet.get(
+                        "error",
+                        "",
+                    ),
+            },
+
+            "evidence_contract": {
+                "unsupported_claims_allowed":
+                    False,
+
+                "tests_may_be_assumed":
+                    False,
+
+                "execution_may_be_assumed":
+                    False,
+
+                "deployment_may_be_assumed":
+                    False,
+
+                "missing_information_label":
+                    "UNVERIFIED",
+
+                "inference_label":
+                    "INFERENCE",
+
+                "supported_fact_label":
+                    "SUPPORTED",
+            },
         }
 
     # -------------------------------------------------------------------------
@@ -435,7 +745,6 @@ Return only the work product for your active worker role.
                 "Job has no active worker."
             )
 
-        # Validate the worker against the engine's governed registry.
         worker = self.engine.current_worker(
             job_id
         )
@@ -446,9 +755,34 @@ Return only the work product for your active worker role.
                 "No executable governed worker is active."
             )
 
-        context = self.build_context(
-            job_id
+        evidence_packet = self.prepare_evidence(
+            state.job.task
         )
+
+        worker_packet = self.worker_packet_builder.build(
+            worker_role=active_worker,
+            task=state.job.task,
+            evidence_packet=evidence_packet,
+            job_id=job_id,
+        )
+
+        context = self.build_context(
+            job_id,
+            evidence_packet=evidence_packet,
+        )
+
+        # The provider receives the deterministic PMEi worker packet,
+        # not the raw retrieved continuity passages.
+        context["pmei_evidence"] = {
+            "retrieval_ok": worker_packet.retrieval_ok,
+            "records_received": worker_packet.records_received,
+            "evidence_count": worker_packet.evidence_count,
+            "route": worker_packet.retrieval_route,
+            "eligible_source_records": worker_packet.source_records,
+            "excluded_records": worker_packet.excluded_records,
+            "worker_packet": worker_packet.rendered_text,
+            "raw_passages_exposed_to_provider": False,
+        }
 
         provider_request = ProviderRequest(
             worker_role=active_worker,
@@ -471,6 +805,34 @@ Return only the work product for your active worker role.
 
                 "orchestration_status":
                     state.status,
+
+                "evidence_bounded":
+                    True,
+
+                "pmei_retrieval_ok":
+                    bool(
+                        evidence_packet.get(
+                            "retrieval_ok",
+                            False,
+                        )
+                    ),
+
+                "pmei_evidence_count":
+                    evidence_packet.get(
+                        "evidence_count",
+                        0,
+                    ),
+
+                "pmei_records_received":
+                    evidence_packet.get(
+                        "records_received",
+                        0,
+                    ),
+
+                "pmei_route":
+                    evidence_packet.get(
+                        "route"
+                    ),
             },
         )
 
@@ -511,6 +873,34 @@ Return only the work product for your active worker role.
 
                     "transition_authority":
                         False,
+
+                    "evidence_bounded":
+                        True,
+
+                    "pmei_retrieval_ok":
+                        bool(
+                            evidence_packet.get(
+                                "retrieval_ok",
+                                False,
+                            )
+                        ),
+
+                    "pmei_evidence_count":
+                        evidence_packet.get(
+                            "evidence_count",
+                            0,
+                        ),
+
+                    "pmei_records_received":
+                        evidence_packet.get(
+                            "records_received",
+                            0,
+                        ),
+
+                    "pmei_route":
+                        evidence_packet.get(
+                            "route"
+                        ),
                 },
             )
 
@@ -537,5 +927,37 @@ Return only the work product for your active worker role.
 
                 "transition_authority":
                     False,
+
+                "evidence_bounded":
+                    True,
+
+                "pmei_retrieval_ok":
+                    bool(
+                        evidence_packet.get(
+                            "retrieval_ok",
+                            False,
+                        )
+                    ),
+
+                "pmei_evidence_count":
+                    evidence_packet.get(
+                        "evidence_count",
+                        0,
+                    ),
+
+                "pmei_records_received":
+                    evidence_packet.get(
+                        "records_received",
+                        0,
+                    ),
+
+                "pmei_route":
+                    evidence_packet.get(
+                        "route"
+                    ),
             },
         )
+
+
+
+
