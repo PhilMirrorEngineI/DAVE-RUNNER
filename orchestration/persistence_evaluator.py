@@ -47,6 +47,9 @@ from .findings_classifier import (
 from .findings_inference import (
     FindingsInferenceExecutor,
 )
+from .persistence_durability import (
+    build_persistence_durability_policy,
+)
 from .persistence_gate import (
     PersistenceDecision,
     build_save_worthiness_gate,
@@ -92,6 +95,10 @@ class AutomaticPersistenceEvaluator:
 
         self.persistence_gate = (
             build_save_worthiness_gate()
+        )
+
+        self.durability_policy = (
+            build_persistence_durability_policy()
         )
 
         self.findings_executor = findings_executor
@@ -140,6 +147,33 @@ class AutomaticPersistenceEvaluator:
                 evidence_status=enriched_finding.evidence_status,
                 originator_type=enriched_finding.originator_type,
             )
+
+            durability = self.durability_policy.assess(
+                classification.finding
+            )
+
+            if durability.transient:
+
+                decision = self.persistence_gate.decide(
+                    classification.finding,
+                    duplicate=classification.duplicate,
+                    transient=True,
+                    authority_sensitive=(
+                        classification.authority_sensitive
+                    ),
+                    novel=False,
+                )
+
+                evaluations.append(
+                    CandidateEvaluation(
+                        finding=classification.finding,
+                        classification=classification,
+                        persistence_decision=decision,
+                        route=decision.disposition,
+                    )
+                )
+
+                continue
 
             if classification.novelty_status == AMBIGUOUS:
 
@@ -234,3 +268,5 @@ def build_automatic_persistence_evaluator(
     return AutomaticPersistenceEvaluator(
         findings_executor=findings_executor,
     )
+
+

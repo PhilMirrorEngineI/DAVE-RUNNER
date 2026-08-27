@@ -1,13 +1,17 @@
 """
-End-to-end regression for automatic ambiguous persistence review.
+Regression for automatic ambiguous persistence handling after the
+durability policy.
+
+A job-scoped runtime observation may be lexically AMBIGUOUS, but it
+must be classified as transient before bounded Findings inference.
 
 WorkerExecution
     -> automatic runtime candidate extraction
     -> deterministic AMBIGUOUS classification
-    -> bounded fake Findings inference
-    -> DUPLICATE
-    -> deterministic resolver
+    -> durability policy
+    -> TRANSIENT_RUNTIME
     -> DO_NOT_SAVE
+    -> Findings NOT invoked
 
 No live LLM.
 No PMEi writes.
@@ -46,14 +50,14 @@ class FakeFindingsProvider(BaseProvider):
             ok=True,
             output_text=(
                 "FINDINGS ANALYSIS\n"
-                "The runtime candidate is substantively already "
-                "represented by the admitted comparison evidence.\n\n"
+                "This should never be called for "
+                "job-scoped runtime telemetry.\n\n"
                 "DISPOSITION: DUPLICATE"
             ),
         )
 
 
-def test_automatic_ambiguous_candidate_is_reviewed():
+def test_job_scoped_ambiguous_candidate_skips_findings():
 
     execution = WorkerExecution(
         job_id="fixture-auto-ambiguous",
@@ -97,28 +101,28 @@ def test_automatic_ambiguous_candidate_is_reviewed():
 
     assert result.pmei_write_performed is False
     assert result.provider_prose_extracted is False
-
     assert len(result.candidates) == 1
 
     candidate = result.candidates[0]
 
+    # Novelty remains AMBIGUOUS. Durability overrides persistence
+    # routing because this is concrete per-job runtime telemetry.
     assert (
         candidate.classification.novelty_status
         == "AMBIGUOUS"
     )
 
     assert candidate.finding.originator_type == "RUNTIME"
+    assert candidate.finding.job_id == "fixture-auto-ambiguous"
 
-    assert candidate.findings_review_performed is True
+    assert candidate.findings_review_performed is False
     assert candidate.findings_review_error == ""
 
-    assert provider.calls == 1
-    assert provider.last_request is not None
-    assert provider.last_request.worker_role == "findings"
+    # The anti-clutter policy prevents an unnecessary model call.
+    assert provider.calls == 0
+    assert provider.last_request is None
 
-    assert (
-        candidate.persistence_decision is not None
-    )
+    assert candidate.persistence_decision is not None
 
     assert (
         candidate.persistence_decision.disposition
@@ -130,9 +134,9 @@ def test_automatic_ambiguous_candidate_is_reviewed():
 
 if __name__ == "__main__":
 
-    test_automatic_ambiguous_candidate_is_reviewed()
+    test_job_scoped_ambiguous_candidate_skips_findings()
 
     print(
-        "automatic ambiguous persistence review "
+        "automatic durability-before-findings "
         "regression test PASS"
     )
