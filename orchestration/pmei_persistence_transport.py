@@ -108,9 +108,7 @@ class PMEiPersistenceTransport:
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": (
-                    f"Bearer {self.api_key}"
-                ),
+                "X-API-KEY": self.api_key,
             },
         )
 
@@ -173,3 +171,4 @@ def build_pmei_persistence_transport(
         enabled=enabled,
         timeout=timeout,
     )
+

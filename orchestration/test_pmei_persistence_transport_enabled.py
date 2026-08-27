@@ -128,12 +128,14 @@ def test_enabled_transport_sends_governed_request():
     )
 
     auth_header = outgoing.get_header(
-        "Authorization"
+        "X-api-key"
     )
 
-    assert auth_header == (
-        "Bearer fixture-secret"
-    )
+    assert auth_header == "fixture-secret"
+
+    assert outgoing.get_header(
+        "Authorization"
+    ) is None
 
 
 if __name__ == "__main__":
@@ -144,3 +146,4 @@ if __name__ == "__main__":
         "enabled PMEi persistence transport "
         "regression test PASS"
     )
+
