@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -223,6 +223,19 @@ class OllamaProvider(BaseProvider):
         self,
         request: ProviderRequest,
     ) -> list:
+        """
+        Build the smallest provider-facing message set.
+
+        Preferred path:
+            governed worker role
+            + deterministic PMEi worker packet
+
+        Raw PMEi continuity passages are not reconstructed here.
+
+        If no deterministic worker packet is present, fall back to the
+        supplied bounded context for compatibility with non-PMEi callers.
+        """
+
         messages = []
 
         system_prompt = str(
@@ -239,50 +252,85 @@ class OllamaProvider(BaseProvider):
                 }
             )
 
-        context_text = ""
+        worker_packet = ""
 
-        if request.context:
-            context_text = json.dumps(
-                request.context,
-                indent=2,
-                ensure_ascii=False,
-                default=str,
+        if isinstance(
+            request.context,
+            dict,
+        ):
+            pmei_evidence = request.context.get(
+                "pmei_evidence"
             )
+
+            if isinstance(
+                pmei_evidence,
+                dict,
+            ):
+                worker_packet = str(
+                    pmei_evidence.get(
+                        "worker_packet"
+                    )
+                    or
+                    ""
+                ).strip()
 
         parts = [
             (
                 "ACTIVE GOVERNED WORKER\n"
                 f"{request.worker_role}"
             ),
-            (
-                "CURRENT TASK\n"
-                f"{request.task}"
-            ),
         ]
 
-        if context_text:
+        if worker_packet:
+
             parts.append(
-                "BOUNDED CONTEXT\n"
-                + context_text
+                (
+                    "PMEI GOVERNED INPUT\n"
+                    f"{worker_packet}"
+                )
             )
 
-        parts.append(
-            """AUTHORITY BOUNDARY
+        else:
 
-You are performing inference for the active worker only.
+            parts.append(
+                (
+                    "CURRENT TASK\n"
+                    f"{request.task}"
+                )
+            )
+
+            if request.context:
+
+                context_text = json.dumps(
+                    request.context,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                )
+
+                parts.append(
+                    (
+                        "BOUNDED CONTEXT\n"
+                        f"{context_text}"
+                    )
+                )
+
+        parts.append(
+            """EXECUTION BOUNDARY
+
+Return only the work product for the active worker.
 
 Do not choose the next worker.
-Do not claim a transition has been approved.
-Do not manufacture human approval.
-Do not claim PMEi was written.
-Do not deploy or self-modify.
-Return only the work product for the active worker."""
+Do not advance orchestration state.
+Do not manufacture human approval."""
         )
 
         messages.append(
             {
                 "role": "user",
-                "content": "\n\n".join(parts),
+                "content": "\n\n".join(
+                    parts
+                ),
             }
         )
 
@@ -448,3 +496,4 @@ def build_provider(
     raise ValueError(
         f"Unknown PMEi worker provider: {name}"
     )
+
