@@ -1,4 +1,4 @@
-﻿"""
+"""
 PMEi DETERMINISTIC WORKER OUTPUT VALIDATOR
 
 Purpose
@@ -103,6 +103,10 @@ class WorkerOutputValidator:
         r"\bcompleted\b",
         r"\bwas completed\b",
         r"\bwere completed\b",
+        r"\b(?:implementation|build|testing|tests|verification)\s+(?:is|are|was|were)\s+complete\b",
+        r"\b(?:approval|human approval)\s+(?:has|have|had)\s+been\s+granted\b",
+        r"\b(?:approval|human approval)\s+(?:is|was)\s+granted\b",
+        r"\b(?:verified|approved|deployed|tested|executed)\b",
     )
 
     def clean_text(
