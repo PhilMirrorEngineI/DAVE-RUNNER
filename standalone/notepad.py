@@ -9,6 +9,15 @@ from urllib.parse import quote_plus, urlparse, parse_qs, unquote
 from datetime import datetime, timezone
 import requests
 
+try:
+    from standalone.historical_continuity import (
+        scan_continuity_archive,
+    )
+except ImportError:
+    from historical_continuity import (
+        scan_continuity_archive,
+    )
+
 BUILD_STATUS = 'CANDIDATE'
 BUILD_NAME = 'v6.8.1-meta-advice-consequence-hardening'
 
@@ -889,6 +898,102 @@ def get_pmei_records():
 
     return [], meta
 
+
+def get_pmei_historical_records(
+    page_size=200
+):
+    meta = empty_pmei_transport()
+    meta['required'] = True
+    meta['route'] = '/memory/continuity/get'
+    meta['exhaustive'] = False
+    meta['scanned_count'] = 0
+    meta['available_count'] = None
+    meta['pages'] = 0
+
+    try:
+        requested_page_size = int(page_size)
+    except (TypeError, ValueError):
+        requested_page_size = 200
+
+    meta['page_size'] = min(
+        max(requested_page_size, 1),
+        200
+    )
+
+    if not API_KEY:
+        meta['errors'].append(
+            'DAVE_RUNNER_API_KEY is not set'
+        )
+        return [], meta
+
+    meta['attempted'] = True
+
+    def fetch_page(request_payload):
+        response = session.post(
+            BASE_URL + '/memory/continuity/get',
+            headers={
+                'X-API-KEY': API_KEY,
+                'Content-Type':
+                    'application/json'
+            },
+            json=request_payload,
+            timeout=TIMEOUT
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+        data = payload.get(
+            'data',
+            payload
+        )
+
+        if isinstance(data, dict):
+            records = (
+                data.get('items')
+                or
+                data.get('records')
+                or
+                []
+            )
+
+        elif isinstance(data, list):
+            records = data
+
+        else:
+            raise ValueError(
+                'Historical continuity response '
+                'did not contain a record list'
+            )
+
+        if not isinstance(records, list):
+            raise ValueError(
+                'Historical continuity records '
+                'were not returned as a list'
+            )
+
+        return records
+
+    records, scan_meta = scan_continuity_archive(
+        fetch_page,
+        page_size=page_size,
+    )
+
+    meta['exhaustive'] = scan_meta['exhaustive']
+    meta['scanned_count'] = scan_meta['scanned_count']
+    meta['available_count'] = scan_meta['available_count']
+    meta['pages'] = scan_meta['pages']
+    meta['page_size'] = scan_meta['page_size']
+
+    meta['errors'].extend(
+        scan_meta['errors']
+    )
+
+    meta['success'] = bool(
+        scan_meta['exhaustive']
+    )
+
+    return records, meta
 
 def load_boot_learning(records):
     global BOOT_STATE
