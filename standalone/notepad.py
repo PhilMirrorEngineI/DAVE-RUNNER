@@ -1,3 +1,4 @@
+from functools import lru_cache
 import os
 import re
 import time
@@ -536,16 +537,72 @@ def clean_url(url):
     return url
 
 
-def raw_words(text):
-    return re.findall(
-        "[a-z0-9]+(?:'[a-z0-9]+)?",
-        (
-            text
-            or ''
-        ).lower()
+@lru_cache(maxsize=8192)
+def _raw_words_cached(text):
+    return tuple(
+        re.findall(
+            "[a-z0-9]+(?:'[a-z0-9]+)?",
+            (
+                text
+                or ''
+            ).lower()
+        )
     )
 
 
+def raw_words(text):
+    return list(
+        _raw_words_cached(
+            text
+        )
+    )
+
+
+def current_state_requested(question):
+    words = set(
+        normalised_words(question)
+    )
+
+    return bool(
+        words.intersection({
+            'current',
+            'currently',
+            'latest',
+            'remaining',
+        })
+    )
+
+
+def continuity_chronology_key(item):
+    timestamp = str(
+        item.get(
+            '_continuity_timestamp'
+        )
+        or
+        ''
+    )
+
+    record_id = item.get(
+        'record_id'
+    )
+
+    try:
+        record_id = int(
+            record_id
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        record_id = -1
+
+    return (
+        timestamp,
+        record_id,
+    )
+
+
+@lru_cache(maxsize=16384)
 def normalise_word(word):
     word = (
         word
@@ -570,31 +627,52 @@ def normalise_word(word):
     return word
 
 
-def normalised_words(text):
-    return [
+@lru_cache(maxsize=8192)
+def _normalised_words_cached(text):
+    return tuple(
         normalise_word(word)
         for word in raw_words(text)
-    ]
+    )
 
 
-def content_words(text):
-    return [
+def normalised_words(text):
+    return list(
+        _normalised_words_cached(text)
+    )
+
+
+@lru_cache(maxsize=8192)
+def _content_words_cached(text):
+    return tuple(
         word
-        for word in normalised_words(text)
+        for word in _normalised_words_cached(text)
         if (
             word not in STOPWORDS
             and
             len(word) > 1
         )
-    ]
+    )
+
+
+def content_words(text):
+    return list(
+        _content_words_cached(text)
+    )
+
+
+@lru_cache(maxsize=8192)
+def _subject_words_cached(text):
+    return tuple(
+        word
+        for word in _content_words_cached(text)
+        if word not in INTENT_WORDS
+    )
 
 
 def subject_words(text):
-    return [
-        word
-        for word in content_words(text)
-        if word not in INTENT_WORDS
-    ]
+    return list(
+        _subject_words_cached(text)
+    )
 
 
 def coverage_required_words(text):
@@ -1391,7 +1469,8 @@ def coverage_terms(question):
     return terms
 
 
-def subject_coverage(
+@lru_cache(maxsize=16384)
+def _subject_coverage_cached(
     text,
     question
 ):
@@ -1404,34 +1483,54 @@ def subject_coverage(
     )
 
     if not required:
-        return {
-            'score': 0.0,
-            'required': [],
-            'found': [],
-            'missing': []
-        }
+        return (
+            0.0,
+            tuple(),
+            tuple(),
+            tuple(),
+        )
 
     matched = required & found
 
-    return {
-        'score':
+    return (
+        (
             len(matched)
             /
-            len(required),
-
-        'required':
-            sorted(required),
-
-        'found':
-            sorted(matched),
-
-        'missing':
+            len(required)
+        ),
+        tuple(sorted(required)),
+        tuple(sorted(matched)),
+        tuple(
             sorted(
                 required - matched
             )
+        ),
+    )
+
+
+def subject_coverage(
+    text,
+    question
+):
+    (
+        score,
+        required,
+        found,
+        missing,
+    ) = _subject_coverage_cached(
+        text,
+        question
+    )
+
+    return {
+        'score': score,
+        'required': list(required),
+        'found': list(found),
+        'missing': list(missing),
     }
 
 
+@lru_cache(maxsize=8192)
 def is_meta_explanation(text):
     lower = (
         text
@@ -1523,6 +1622,7 @@ def is_meta_explanation(text):
     return False
 
 
+@lru_cache(maxsize=8192)
 def explanation_score(text):
     if is_meta_explanation(text):
         return 0
@@ -1590,6 +1690,7 @@ def boilerplate_ratio(text):
     )
 
 
+@lru_cache(maxsize=8192)
 def ui_phrase_hits(text):
     lower = (
         text
@@ -1633,6 +1734,7 @@ def repeated_navigation_score(text):
     )
 
 
+@lru_cache(maxsize=8192)
 def looks_like_navigation_block(text):
     text = ' '.join(
         (
@@ -1700,6 +1802,7 @@ def looks_like_navigation_block(text):
     return False
 
 
+@lru_cache(maxsize=8192)
 def hard_boilerplate_reject(text):
     if looks_like_navigation_block(text):
         return True
@@ -1903,23 +2006,55 @@ def source_subject_relevance(
     )
 
 
+def question_echo_reject(
+    text,
+    question
+):
+    coverage = subject_coverage(
+        text,
+        question
+    )['score']
+
+    gain = information_gain(
+        text,
+        question
+    )
+
+    return (
+        coverage >= 1.0
+        and
+        gain < 0.50
+    )
+
+
+
+@lru_cache(maxsize=8192)
+def _passage_pieces_cached(text):
+    pieces = re.split(
+        r'\\n+|(?<=[.!?])(?:[\\\'\"??])?\\s+',
+        text
+    )
+
+    return tuple(
+        ' '.join(
+            sentence.split()
+        )
+        for sentence in pieces
+    )
+
 def best_passages(
     text,
     query,
     question,
     limit=4
 ):
-    pieces = re.split(
-        '\\n+|(?<=[.!?])\\s+',
+    pieces = _passage_pieces_cached(
         text
     )
 
     ranked = []
 
     for sentence in pieces:
-        sentence = ' '.join(
-            sentence.split()
-        )
 
         if len(sentence) < 35:
             continue
@@ -1928,6 +2063,12 @@ def best_passages(
             continue
 
         if is_meta_explanation(sentence):
+            continue
+
+        if question_echo_reject(
+            sentence,
+            question
+        ):
             continue
 
         usefulness = passage_usefulness(
@@ -2295,6 +2436,9 @@ def retrieve_pmei(
                 'record_id':
                     record_id,
 
+                '_continuity_timestamp':
+                    record.get('timestamp'),
+
                 'retrieval_type':
                     'PMEI_CONTINUITY_RECORD',
 
@@ -2317,6 +2461,10 @@ def retrieve_pmei(
                     )['score']
             })
 
+    current_state = current_state_requested(
+        question
+    )
+
     evidence.sort(
         reverse=True,
         key=lambda item:
@@ -2326,11 +2474,41 @@ def retrieve_pmei(
                     question
                 ),
                 item['coverage'],
+                (
+                    continuity_chronology_key(item)
+                    if current_state
+                    else ('', -1)
+                ),
                 item['usefulness']
             )
     )
 
-    return evidence[:20]
+    # Preserve record diversity before applying the bounded candidate
+    # surface. A continuity record may produce several useful passages,
+    # but it must not consume multiple candidate slots before downstream
+    # qualification and authority checks.
+    diverse_evidence = []
+    seen_record_ids = set()
+
+    for item in evidence:
+        record_id = item.get('record_id')
+
+        if record_id in seen_record_ids:
+            continue
+
+        seen_record_ids.add(record_id)
+        diverse_evidence.append(item)
+
+        if len(diverse_evidence) >= 20:
+            break
+
+    for item in diverse_evidence:
+        item.pop(
+            '_continuity_timestamp',
+            None
+        )
+
+    return diverse_evidence
 
 
 def question_type(question):

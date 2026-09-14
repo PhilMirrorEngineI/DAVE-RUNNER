@@ -60,19 +60,59 @@ class WorkerPacket:
     job_id: str = ""
 
     retrieval_ok: bool = False
+    evidence_sufficient: bool = False
     retrieval_route: Optional[str] = None
     records_received: int = 0
     evidence_count: int = 0
+
+    historical_scan: bool = False
+    scanned_count: int = 0
+    available_count: Optional[int] = None
+    historical_pages: int = 0
+    historical_exhaustive: bool = False
+    historical_errors: List[str] = field(
+        default_factory=list
+    )
+    newest_record: Dict[str, Any] = field(
+        default_factory=dict
+    )
+    oldest_record: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
     source_records: List[Any] = field(
         default_factory=list
     )
 
     excluded_records: List[Any] = field(
+
+
+        default_factory=list
+
+
+    )
+
+
+
+    task_unsupported_records: List[Any] = field(
+
+
+        default_factory=list
+
+
+    )
+
+
+
+    supported_state: List[str] = field(
         default_factory=list
     )
 
-    supported_state: List[str] = field(
+    contextual_evidence: List[str] = field(
+        default_factory=list
+    )
+
+    evidence_positions: List[Dict[str, Any]] = field(
         default_factory=list
     )
 
@@ -241,6 +281,13 @@ class PMEiWorkerPacketBuilder:
         Classify evidence from explicit PMEi provenance metadata.
 
         This does not inspect the passage prose to infer authority.
+
+        READ ONLY may be the complete seal or the leading authority
+        qualifier of a compound seal. Additional qualifiers do not remove
+        READ ONLY evidence status.
+
+        Non-authoritative message provenance remains excluded before any
+        READ ONLY classification is considered.
         """
 
         seal = self.normalise_seal(
@@ -265,10 +312,22 @@ class PMEiWorkerPacketBuilder:
         if session_ref == "pmei_messages":
             return "NON_AUTHORITATIVE_MESSAGE"
 
-        if seal == "READ ONLY":
+        if (
+            seal == "READ ONLY"
+            or
+            seal.startswith("READ ONLY ")
+            or
+            seal.startswith("READ ONLY;")
+        ):
             return "READ_ONLY_EVIDENCE"
 
-        if seal == "READ_ONLY":
+        if (
+            seal == "READ_ONLY"
+            or
+            seal.startswith("READ_ONLY ")
+            or
+            seal.startswith("READ_ONLY;")
+        ):
             return "READ_ONLY_EVIDENCE"
 
         if seal == "LAWFUL":
@@ -290,10 +349,134 @@ class PMEiWorkerPacketBuilder:
             )
         )
 
-        return authority_class in {
+        if authority_class not in {
             "LAWFUL_EVIDENCE",
             "READ_ONLY_EVIDENCE",
-        }
+        }:
+            return False
+
+        return (
+            self.clean_text(
+                item.get(
+                    "task_alignment"
+                )
+            ).upper()
+            ==
+            "DIRECT"
+        )
+
+    def evidence_state_support_class(
+        self,
+        item: Dict[str, Any],
+    ) -> str:
+        """
+        Classify what this evidence may establish about CURRENT state.
+
+        This is deliberately independent from task_alignment.
+
+        DIRECT means relevant to the current task.
+        It does not by itself establish that a proposition is true now.
+        """
+
+        authority_class = (
+            self.evidence_authority_class(
+                item
+            )
+        )
+
+        if authority_class not in {
+            "LAWFUL_EVIDENCE",
+            "READ_ONLY_EVIDENCE",
+        }:
+            return "AUTHORITY_INELIGIBLE"
+
+        task_alignment = self.clean_text(
+            item.get(
+                "task_alignment"
+            )
+        ).upper()
+
+        if task_alignment != "DIRECT":
+            return "NOT_DIRECT"
+
+        temporal_scope = self.clean_text(
+            item.get(
+                "temporal_scope"
+            )
+        ).upper()
+
+        if temporal_scope == "HISTORICAL":
+            return "HISTORICAL_CONTEXT_ONLY"
+
+        if temporal_scope == "CURRENT":
+            return "CURRENT_STATE_ELIGIBLE"
+
+        if temporal_scope == "UNRESOLVED_CURRENT_OR_GENERAL":
+            return "CURRENT_STATE_UNRESOLVED"
+
+        return "POSITION_UNKNOWN"
+
+
+    def task_unsupported_record_ids(
+        self,
+        evidence,
+    ) -> List[Any]:
+        """
+        Return provenance-eligible records which are not DIRECT for
+        the current task.
+
+        This is deliberately separate from authority/provenance
+        exclusion. A lawful or READ ONLY record does not become
+        non-authoritative merely because it is ADJACENT or
+        NON_QUALIFYING for this task.
+        """
+
+        result = []
+
+        for item in evidence:
+
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            authority_class = (
+                self.evidence_authority_class(
+                    item
+                )
+            )
+
+            if authority_class not in {
+                "LAWFUL_EVIDENCE",
+                "READ_ONLY_EVIDENCE",
+            }:
+                continue
+
+            task_alignment = self.clean_text(
+                item.get(
+                    "task_alignment"
+                )
+            ).upper()
+
+            if task_alignment == "DIRECT":
+                continue
+
+            record_id = item.get(
+                "record_id"
+            )
+
+            if (
+                record_id is not None
+                and
+                record_id not in result
+            ):
+                result.append(
+                    record_id
+                )
+
+        return result
+
 
     def authority_score_adjustment(
         self,
@@ -573,9 +756,17 @@ class PMEiWorkerPacketBuilder:
                 "record_id"
             )
 
-            if not self.evidence_is_supported_state_eligible(
-                item
-            ):
+            
+            authority_class = (
+                self.evidence_authority_class(
+                    item
+                )
+            )
+
+            if authority_class not in {
+                "LAWFUL_EVIDENCE",
+                "READ_ONLY_EVIDENCE",
+            }:
 
                 if (
                     record_id is not None
@@ -587,6 +778,25 @@ class PMEiWorkerPacketBuilder:
                     )
 
                 continue
+
+            task_alignment = self.clean_text(
+                item.get(
+                    "task_alignment"
+                )
+            ).upper()
+
+            if task_alignment != "DIRECT":
+                continue
+
+            state_support = (
+                self.evidence_state_support_class(
+                    item
+                )
+            )
+
+            if state_support != "CURRENT_STATE_ELIGIBLE":
+                continue
+
 
             if (
                 record_id is not None
@@ -815,7 +1025,7 @@ class PMEiWorkerPacketBuilder:
             "RETRIEVAL STATUS:",
             (
                 "SUPPORTED"
-                if packet.retrieval_ok
+                if packet.evidence_sufficient
                 else
                 "NO DIRECT EVIDENCE"
             ),
@@ -831,6 +1041,68 @@ class PMEiWorkerPacketBuilder:
                 f"Retrieval route: "
                 f"{packet.retrieval_route or 'none'}"
             ),
+        ])
+
+        if packet.historical_scan:
+
+            lines.extend([
+                (
+                    f"Historical records scanned: "
+                    f"{packet.scanned_count}"
+                ),
+                (
+                    f"Historical records available: "
+                    +
+                    (
+                        str(packet.available_count)
+                        if packet.available_count is not None
+                        else
+                        "unknown"
+                    )
+                ),
+                (
+                    f"Historical pages: "
+                    f"{packet.historical_pages}"
+                ),
+                (
+                    f"Historical traversal exhaustive: "
+                    f"{str(packet.historical_exhaustive).lower()}"
+                ),
+                (
+                    "Historical retrieval errors: "
+                    +
+                    (
+                        "; ".join(packet.historical_errors)
+                        if packet.historical_errors
+                        else
+                        "none"
+                    )
+                ),
+                (
+                    "Historical newest record: "
+                    +
+                    (
+                        f"id={packet.newest_record.get('id')}, "
+                        f"title={packet.newest_record.get('title') or 'unknown'}"
+                        if packet.newest_record
+                        else
+                        "unknown"
+                    )
+                ),
+                (
+                    "Historical oldest record: "
+                    +
+                    (
+                        f"id={packet.oldest_record.get('id')}, "
+                        f"title={packet.oldest_record.get('title') or 'unknown'}"
+                        if packet.oldest_record
+                        else
+                        "unknown"
+                    )
+                ),
+            ])
+
+        lines.extend([
             "",
             "SUPPORTED STATE:",
         ])
@@ -851,6 +1123,74 @@ class PMEiWorkerPacketBuilder:
 
         lines.extend([
             "",
+            "EVIDENCE POSITION:",
+        ])
+
+        if packet.evidence_positions:
+
+            for item in packet.evidence_positions:
+
+                lines.append(
+                    (
+                        "- Record "
+                        f"{item.get('record_id')} | "
+                        "proposition="
+                        f"{item.get('proposition_type') or 'UNKNOWN'} | "
+                        "temporal="
+                        f"{item.get('temporal_scope') or 'UNKNOWN'} | "
+                        "role="
+                        f"{item.get('evidence_role') or 'UNKNOWN'} | "
+                        "task="
+                        f"{item.get('task_alignment') or 'UNKNOWN'} | "
+                        "state_support="
+                        f"{item.get('state_support') or 'UNKNOWN'}"
+                    )
+                )
+
+        else:
+
+            lines.append(
+                "- none"
+            )
+
+        lines.extend([
+            "",
+            "CONTEXTUAL EVIDENCE ? NOT CURRENT-STATE PROOF:",
+        ])
+
+        if packet.contextual_evidence:
+
+            for item in packet.contextual_evidence:
+
+                lines.append(
+                    f"- {item}"
+                )
+
+        else:
+
+            lines.append(
+                "- none"
+            )
+
+        lines.extend([
+            "",
+            "STATE SUPPORT BOUNDARY:",
+            (
+                "- CURRENT_STATE_ELIGIBLE may support a claim "
+                "about current state."
+            ),
+            (
+                "- HISTORICAL_CONTEXT_ONLY remains relevant evidence "
+                "but does not by itself establish current state."
+            ),
+            (
+                "- CURRENT_STATE_UNRESOLVED is relevant but must not "
+                "be silently promoted to current-state truth."
+            ),
+            (
+                "- DIRECT describes task relevance, not temporal truth."
+            ),
+            "",
             "PROVENANCE FILTER:",
             (
                 "Eligible source records: "
@@ -868,7 +1208,7 @@ class PMEiWorkerPacketBuilder:
                 )
             ),
             (
-                "Excluded non-authoritative/unsupported records: "
+                "Authority-excluded records: "
                 +
                 (
                     ", ".join(
@@ -878,6 +1218,22 @@ class PMEiWorkerPacketBuilder:
                         for item in packet.excluded_records
                     )
                     if packet.excluded_records
+                    else
+                    "none"
+                )
+            ),
+            "",
+            (
+                "Task-unsupported records: "
+                +
+                (
+                    ", ".join(
+                        str(
+                            item
+                        )
+                        for item in packet.task_unsupported_records
+                    )
+                    if packet.task_unsupported_records
                     else
                     "none"
                 )
@@ -979,6 +1335,199 @@ class PMEiWorkerPacketBuilder:
             worker_role=worker_role,
         )
 
+        task_unsupported_records = (
+            self.task_unsupported_record_ids(
+                evidence
+            )
+        )
+
+        # -----------------------------------------------------------------
+        # FOH BROAD PMEi ORIENTATION CONTEXT
+        # -----------------------------------------------------------------
+        #
+        # This lane is deliberately separate from SUPPORTED STATE.
+        #
+        # ADJACENT evidence may help explain PMEi identity, continuity,
+        # governance and architecture without becoming current-state proof.
+        #
+        # This does not alter task_alignment, temporal_scope or state_support.
+        # -----------------------------------------------------------------
+
+        contextual_evidence = []
+
+        task_lower = task.lower()
+
+        broad_pmei_orientation = (
+            worker_role == "foh"
+            and
+            "pmei" in task_lower
+            and
+            "what is" in task_lower
+            and
+            (
+                "proven" in task_lower
+                or
+                "unverified" in task_lower
+                or
+                "currently" in task_lower
+                or
+                "current" in task_lower
+            )
+        )
+
+        if broad_pmei_orientation:
+
+            orientation_markers = (
+                "identity",
+                "lineage",
+                "evidence",
+                "state",
+                "session",
+                "continuity",
+                "governance",
+                "orchestration",
+                "bootstrap",
+                "persistent",
+            )
+
+            contextual_candidates = []
+
+            for position, item in enumerate(evidence):
+
+                if not isinstance(item, dict):
+                    continue
+
+                authority_class = (
+                    self.evidence_authority_class(
+                        item
+                    )
+                )
+
+                if authority_class not in {
+                    "LAWFUL_EVIDENCE",
+                    "READ_ONLY_EVIDENCE",
+                }:
+                    continue
+
+                task_alignment = self.clean_text(
+                    item.get(
+                        "task_alignment"
+                    )
+                ).upper()
+
+                if task_alignment != "ADJACENT":
+                    continue
+
+                evidence_role = self.clean_text(
+                    item.get(
+                        "evidence_role"
+                    )
+                ).upper()
+
+                if evidence_role == "TASK_ECHO":
+                    continue
+
+                text_value = self.clean_text(
+                    item.get(
+                        "text"
+                    )
+                )
+
+                if not text_value:
+                    continue
+
+                orientation_text = (
+                    self.clean_text(
+                        item.get(
+                            "human_title"
+                        )
+                    )
+                    +
+                    " "
+                    +
+                    text_value
+                ).lower()
+
+                orientation_score = sum(
+                    1
+                    for marker in orientation_markers
+                    if marker in orientation_text
+                )
+
+                if orientation_score <= 0:
+                    continue
+
+                contextual_candidates.append(
+                    (
+                        -orientation_score,
+                        position,
+                        item,
+                        text_value,
+                        authority_class,
+                    )
+                )
+
+            contextual_candidates.sort(
+                key=lambda entry: (
+                    entry[0],
+                    entry[1],
+                )
+            )
+
+            for (
+                _negative_score,
+                _position,
+                item,
+                text_value,
+                authority_class,
+            ) in contextual_candidates[:2]:
+
+                record_id = item.get(
+                    "record_id"
+                )
+
+                state_support = (
+                    self.evidence_state_support_class(
+                        item
+                    )
+                )
+
+                sentences = self.sentences(
+                    text_value
+                )
+
+                contextual_text = (
+                    sentences[0]
+                    if sentences
+                    else text_value
+                )
+
+                if len(contextual_text) > self.max_sentence_chars:
+                    contextual_text = (
+                        contextual_text[
+                            :self.max_sentence_chars
+                        ].rstrip()
+                        +
+                        "..."
+                    )
+
+                if record_id is None:
+                    contextual_evidence.append(
+                        f"[{authority_class} | "
+                        f"{task_alignment} | "
+                        f"{state_support}] "
+                        f"{contextual_text}"
+                    )
+                else:
+                    contextual_evidence.append(
+                        f"[PMEi Record {record_id} | "
+                        f"{authority_class} | "
+                        f"{task_alignment} | "
+                        f"{state_support}] "
+                        f"{contextual_text}"
+                    )
+
+
         packet = WorkerPacket(
             worker_role=worker_role,
 
@@ -991,6 +1540,10 @@ class PMEiWorkerPacketBuilder:
                     "retrieval_ok",
                     False,
                 )
+            ),
+
+            evidence_sufficient=bool(
+                supported_state
             ),
 
             retrieval_route=evidence_packet.get(
@@ -1010,11 +1563,133 @@ class PMEiWorkerPacketBuilder:
                 evidence
             ),
 
+            historical_scan=bool(
+                evidence_packet.get(
+                    "historical_scan",
+                    False,
+                )
+            ),
+
+            scanned_count=int(
+                evidence_packet.get(
+                    "scanned_count",
+                    0,
+                )
+                or
+                0
+            ),
+
+            available_count=(
+                int(
+                    evidence_packet.get(
+                        "available_count"
+                    )
+                )
+                if evidence_packet.get(
+                    "available_count"
+                ) is not None
+                else
+                None
+            ),
+
+            historical_pages=int(
+                evidence_packet.get(
+                    "pages",
+                    0,
+                )
+                or
+                0
+            ),
+
+            historical_exhaustive=bool(
+                evidence_packet.get(
+                    "exhaustive",
+                    False,
+                )
+            ),
+
+            historical_errors=list(
+                evidence_packet.get(
+                    "historical_errors",
+                    []
+                )
+                or
+                []
+            ),
+
+            newest_record=dict(
+                evidence_packet.get(
+                    "newest_record",
+                    {}
+                )
+                or
+                {}
+            ),
+
+            oldest_record=dict(
+                evidence_packet.get(
+                    "oldest_record",
+                    {}
+                )
+                or
+                {}
+            ),
+
             source_records=source_records,
 
             excluded_records=excluded_records,
 
+
+
+            task_unsupported_records=task_unsupported_records,
+
+
+
             supported_state=supported_state,
+
+            contextual_evidence=contextual_evidence,
+
+            evidence_positions=[
+                {
+                    "record_id":
+                        item.get(
+                            "record_id"
+                        ),
+                    "task_alignment":
+                        self.clean_text(
+                            item.get(
+                                "task_alignment"
+                            )
+                        ).upper(),
+                    "proposition_type":
+                        self.clean_text(
+                            item.get(
+                                "proposition_type"
+                            )
+                        ).upper(),
+                    "temporal_scope":
+                        self.clean_text(
+                            item.get(
+                                "temporal_scope"
+                            )
+                        ).upper(),
+                    "evidence_role":
+                        self.clean_text(
+                            item.get(
+                                "evidence_role"
+                            )
+                        ).upper(),
+                    "state_support":
+                        self.evidence_state_support_class(
+                            item
+                        ),
+                }
+                for item in evidence
+                if isinstance(
+                    item,
+                    dict,
+                )
+            ],
 
             current_job_unverified=(
                 self.current_job_unverified_items()

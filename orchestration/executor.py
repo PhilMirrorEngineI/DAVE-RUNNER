@@ -1,4 +1,4 @@
-﻿"""
+"""
 PMEi GOVERNED WORKER EXECUTOR
 
 Purpose
@@ -168,6 +168,21 @@ Do not perform the Builder or Knobhead role.
 Do not choose the next worker.
 Do not advance orchestration state.
 
+Evidence scope rules:
+
+Eligible READ ONLY continuity evidence may support bounded historical, contractual, architectural, and previously evidenced claims within the scope actually stated by that evidence.
+
+CURRENT-JOB UNVERIFIED applies only to claims about this job's execution, tests, runtime behaviour, measurements, verification, or human approval.
+
+It does not invalidate otherwise eligible SUPPORTED STATE.
+
+Continuity evidence does not by itself prove that a prior implementation, test result, runtime behaviour, verification, measurement, or approval is true of the current job.
+
+Preserve the distinction between:
+- what continuity evidence records or establishes;
+- what was previously evidenced;
+- what this current job has directly executed, inspected, tested, verified, measured, or approved.
+
 Return Engineering work product using exactly these sections:
 
 SUPPORTED EVIDENCE
@@ -175,9 +190,15 @@ Only facts supported by the PMEi governed packet.
 
 ENGINEERING ANALYSIS
 Your bounded technical analysis.
+Every proposition that goes beyond what the governed packet explicitly
+establishes must be prefixed with "INFERENCE:".
+Do not present an implication, extrapolation, prohibition, requirement,
+or architectural conclusion as a supported fact unless the governed
+packet explicitly states it.
 
 UNVERIFIED
-Anything not established by the governed packet.
+Anything not established by the governed packet and not justified as a
+clearly labelled inference.
 
 BUILDER REQUIREMENT
 State the bounded implementation requirement if one is justified.
@@ -491,6 +512,9 @@ Return only the evidence-bounded work product for your active worker role.
                 "route":
                     None,
 
+                "transport":
+                    {},
+
                 "evidence":
                     [],
 
@@ -529,6 +553,16 @@ Return only the evidence-bounded work product for your active worker role.
                         dict,
                     )
                     else None
+                ),
+
+            "transport":
+                (
+                    dict(packet.transport)
+                    if isinstance(
+                        packet.transport,
+                        dict,
+                    )
+                    else {}
                 ),
 
             "evidence":
@@ -753,6 +787,74 @@ Return only the evidence-bounded work product for your active worker role.
             state.job.task
         )
 
+        transport = evidence_packet.get(
+            "transport",
+            {},
+        )
+
+        if not isinstance(
+            transport,
+            dict,
+        ):
+            transport = {}
+
+        historical_scan = bool(
+            self.evidence_adapter.historical_scan_requested(
+                state.job.task
+            )
+        )
+
+        evidence_packet["historical_scan"] = (
+            historical_scan
+        )
+
+        if historical_scan:
+            evidence_packet["scanned_count"] = int(
+                transport.get(
+                    "scanned_count",
+                    0,
+                )
+                or
+                0
+            )
+            evidence_packet["available_count"] = (
+                transport.get(
+                    "available_count"
+                )
+            )
+            evidence_packet["pages"] = int(
+                transport.get(
+                    "pages",
+                    0,
+                )
+                or
+                0
+            )
+            evidence_packet["exhaustive"] = bool(
+                transport.get(
+                    "exhaustive",
+                    False,
+                )
+            )
+            evidence_packet["historical_errors"] = list(
+                transport.get(
+                    "errors",
+                    []
+                )
+                or
+                []
+            )
+
+            evidence_packet["newest_record"] = dict(
+                transport.get("newest_record", {})
+                or {}
+            )
+
+            evidence_packet["oldest_record"] = dict(
+                transport.get("oldest_record", {})
+                or {}
+            )
+
         worker_packet = self.worker_packet_builder.build(
             worker_role=active_worker,
             task=state.job.task,
@@ -772,6 +874,14 @@ Return only the evidence-bounded work product for your active worker role.
             "records_received": worker_packet.records_received,
             "evidence_count": worker_packet.evidence_count,
             "route": worker_packet.retrieval_route,
+            "historical_scan": worker_packet.historical_scan,
+            "scanned_count": worker_packet.scanned_count,
+            "available_count": worker_packet.available_count,
+            "pages": worker_packet.historical_pages,
+            "exhaustive": worker_packet.historical_exhaustive,
+            "historical_errors": worker_packet.historical_errors,
+            "newest_record": worker_packet.newest_record,
+            "oldest_record": worker_packet.oldest_record,
             "eligible_source_records": worker_packet.source_records,
             "excluded_records": worker_packet.excluded_records,
             "worker_packet": worker_packet.rendered_text,

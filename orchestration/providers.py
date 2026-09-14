@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -125,12 +125,18 @@ class OllamaProvider(BaseProvider):
         timeout: float = DEFAULT_OLLAMA_TIMEOUT,
         num_ctx: int = DEFAULT_OLLAMA_NUM_CTX,
         num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT,
+        num_gpu: int | None = None,
     ) -> None:
         self.base_url = str(base_url).strip().rstrip("/")
         self.model = str(model).strip()
         self.timeout = float(timeout)
         self.num_ctx = int(num_ctx)
         self.num_predict = int(num_predict)
+        self.num_gpu = (
+            None
+            if num_gpu is None
+            else int(num_gpu)
+        )
 
         if not self.base_url:
             raise ValueError("Ollama base URL is required.")
@@ -369,6 +375,11 @@ Do not manufacture human approval."""
                 "temperature": float(request.temperature),
                 "num_ctx": self.num_ctx,
                 "num_predict": self.num_predict,
+                **(
+                    {"num_gpu": self.num_gpu}
+                    if self.num_gpu is not None
+                    else {}
+                ),
             },
         }
 
@@ -464,6 +475,8 @@ Do not manufacture human approval."""
                 "eval_count": data.get("eval_count"),
                 "total_duration": data.get("total_duration"),
                 "load_duration": data.get("load_duration"),
+                "prompt_eval_duration": data.get("prompt_eval_duration"),
+                "eval_duration": data.get("eval_duration"),
                 "reasoning_wrapper_removed": raw_content != output_text,
             },
         )
