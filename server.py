@@ -1287,17 +1287,94 @@ def continuity_get():
     session_ref = (data.get("session_ref") or data.get("thread_id") or "").strip()
     limit = min(max(int(data.get("limit") or 10), 1), 200)
 
+    before_timestamp = data.get("before_timestamp")
+    before_id = data.get("before_id")
+
+    if (before_timestamp is None) != (before_id is None):
+        return fail(
+            "before_timestamp and before_id must be supplied together",
+            400
+        )
+
     try:
         with get_db() as conn, conn.cursor() as cur:
             if save_id:
-                cur.execute(CONTINUITY_SELECT + " WHERE user_id=%s AND save_id=%s LIMIT 1;", (user, save_id))
+                cur.execute(
+                    CONTINUITY_SELECT
+                    + " WHERE user_id=%s AND save_id=%s LIMIT 1;",
+                    (user, save_id)
+                )
+
+            elif session_ref and before_timestamp is not None:
+                cur.execute(
+                    CONTINUITY_SELECT
+                    + """
+                    WHERE user_id=%s
+                      AND session_ref=%s
+                      AND (
+                          timestamp < %s
+                          OR (timestamp = %s AND id < %s)
+                      )
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT %s;
+                    """,
+                    (
+                        user,
+                        session_ref,
+                        before_timestamp,
+                        before_timestamp,
+                        before_id,
+                        limit
+                    )
+                )
+
             elif session_ref:
-                cur.execute(CONTINUITY_SELECT + " WHERE user_id=%s AND session_ref=%s ORDER BY timestamp DESC LIMIT %s;", (user, session_ref, limit))
+                cur.execute(
+                    CONTINUITY_SELECT
+                    + " WHERE user_id=%s AND session_ref=%s "
+                      "ORDER BY timestamp DESC, id DESC LIMIT %s;",
+                    (user, session_ref, limit)
+                )
+
+            elif before_timestamp is not None:
+                cur.execute(
+                    CONTINUITY_SELECT
+                    + """
+                    WHERE user_id=%s
+                      AND (
+                          timestamp < %s
+                          OR (timestamp = %s AND id < %s)
+                      )
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT %s;
+                    """,
+                    (
+                        user,
+                        before_timestamp,
+                        before_timestamp,
+                        before_id,
+                        limit
+                    )
+                )
+
             else:
-                cur.execute(CONTINUITY_SELECT + " WHERE user_id=%s ORDER BY timestamp DESC LIMIT %s;", (user, limit))
+                cur.execute(
+                    CONTINUITY_SELECT
+                    + " WHERE user_id=%s "
+                      "ORDER BY timestamp DESC, id DESC LIMIT %s;",
+                    (user, limit)
+                )
+
             rows = cur.fetchall()
 
-        return ok({"count": len(rows), "items": [continuity_row_to_item(row) for row in rows]})
+        return ok({
+            "count": len(rows),
+            "items": [
+                continuity_row_to_item(row)
+                for row in rows
+            ]
+        })
+
     except Exception as exc:
         return fail(f"Database error: {exc}", 500)
 
