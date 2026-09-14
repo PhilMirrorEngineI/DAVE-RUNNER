@@ -25,6 +25,7 @@ from orchestration.question_intent import classify_question_intent
 from orchestration.relationship_bridge import translate_governed_evidence
 from orchestration.deterministic_relationship_engine import run_relationship_engine
 from orchestration.evidence_adapter import PMEiEvidenceAdapter
+from orchestration.evidence_relationship import EvidenceItem
 from orchestration.worker_packet import build_worker_packet_builder
 from orchestration.store import JsonOrchestrationStore
 
@@ -1561,6 +1562,67 @@ def deterministic_pmei_chat():
                     authority_classifier,
                 )
             )
+
+            if (
+                deterministic_intent.intent
+                == "IDENTITY_DEFINITION"
+            ):
+                configured_worker = (
+                    _worker_manifest()
+                    .get("foh", {})
+                )
+
+                configured_name = str(
+                    configured_worker.get(
+                        "name",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                configured_role = str(
+                    configured_worker.get(
+                        "role",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                configured_function = str(
+                    configured_worker.get(
+                        "function",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if (
+                    configured_name
+                    and configured_role
+                    and configured_function
+                ):
+                    configured_identity = (
+                        EvidenceItem(
+                            record_id="CONFIGURED:FOH",
+                            evidence_kind="IDENTITY",
+                            temporal_scope="CURRENT",
+                            text=(
+                                f"{configured_name} is the configured "
+                                f"worker identity. Role: "
+                                f"{configured_role}. Function: "
+                                f"{configured_function}"
+                            ),
+                            authority_eligible=True,
+                            evidence_role=(
+                                "CONFIGURED_RUNTIME_IDENTITY"
+                            ),
+                        ),
+                    )
+
+                    relationship_evidence = (
+                        configured_identity
+                        + relationship_evidence
+                    )
 
             relationship_result = (
                 run_relationship_engine(

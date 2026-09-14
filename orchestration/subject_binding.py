@@ -84,6 +84,27 @@ def subject_tokens(question: str) -> Tuple[str, ...]:
         question
     )
 
+    identity_definition_non_subject_terms = {
+        "s",
+        "identity",
+        "definition",
+        "define",
+        "defines",
+        "defined",
+        "role",
+        "roles",
+        "function",
+        "functions",
+        "worker",
+        "workers",
+        "agent",
+        "agents",
+        "specialist",
+        "specialists",
+        "responsibility",
+        "responsibilities",
+    }
+
     past_state_non_subject_terms = {
         "working",
         "active",
@@ -186,6 +207,10 @@ def subject_tokens(question: str) -> Tuple[str, ...]:
     for token in raw_tokens:
         if token in QUESTION_STOPWORDS:
             continue
+
+        if intent.intent == "IDENTITY_DEFINITION":
+            if token in identity_definition_non_subject_terms:
+                continue
 
         if intent.intent == "PAST_STATE":
             if token in past_state_non_subject_terms:
