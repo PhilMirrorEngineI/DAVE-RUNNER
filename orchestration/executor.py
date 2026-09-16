@@ -60,6 +60,8 @@ from .providers import (
     ProviderResponse,
     build_provider,
 )
+from .source_router import WEB_LOOKUP, route_source, split_source_request
+from .external_retrieval import ExternalRetriever
 from .transitions import HUMAN_GATE
 
 
@@ -155,6 +157,30 @@ supplied evidence.
 # WORKER PROMPTS
 # =============================================================================
 
+WEB_LOOKUP_ENGINEERING_PROMPT = f"""
+You are the Engineering worker answering an external-world question.
+
+Answer the external-world question using the external sourced evidence
+supplied in the governed worker packet.
+
+External sourced evidence may inform the answer, but does not by itself
+establish PMEi fact, PMEi current state, PMEi authority, human approval,
+or a required PMEi action.
+
+Preserve source attribution.
+Do not invent facts beyond the supplied external evidence.
+Clearly label any inference that goes beyond what the supplied evidence
+directly supports.
+
+Do not perform the Builder or Knobhead role.
+Do not choose the next worker.
+Do not advance orchestration state.
+Do not write PMEi continuity.
+
+{COMMON_EVIDENCE_CONTRACT}
+""".strip()
+
+
 WORKER_SYSTEM_PROMPTS = {
     "engineering": f"""
 You are the Engineering worker.
@@ -177,6 +203,13 @@ CURRENT-JOB UNVERIFIED applies only to claims about this job's execution, tests,
 It does not invalidate otherwise eligible SUPPORTED STATE.
 
 Continuity evidence does not by itself prove that a prior implementation, test result, runtime behaviour, verification, measurement, or approval is true of the current job.
+
+Governed learning may inform reasoning about the current task, but does not by itself establish fact, current state, authority, or required action.
+
+External sourced evidence may inform reasoning about the current task, but does not by itself establish PMEi fact, current state, authority, or required action.
+
+When governed learning contains a relevant successful pattern, use that pattern to inform the engineering reasoning for the current task.
+Do not treat governed learning as proof of a current fact, current state, authority, or required action.
 
 Preserve the distinction between:
 - what continuity evidence records or establishes;
@@ -407,6 +440,7 @@ class WorkerExecutor:
         engine: OrchestrationEngine,
         provider: BaseProvider | None = None,
         evidence_adapter: PMEiEvidenceAdapter | None = None,
+        external_retriever: ExternalRetriever | None = None,
     ) -> None:
 
         self.engine = engine
@@ -428,6 +462,11 @@ class WorkerExecutor:
             )
         )
 
+        self.external_retriever = (
+            external_retriever
+            if external_retriever is not None
+            else ExternalRetriever()
+        )
         # Deterministic PMEi evidence-to-worker packet preparation.
         # This occurs before optional provider inference.
         self.worker_packet_builder = (
@@ -448,7 +487,14 @@ class WorkerExecutor:
     def system_prompt_for_worker(
         self,
         worker_role: str,
+        source_route: str | None = None,
     ) -> str:
+
+        if (
+            worker_role == "engineering"
+            and source_route == WEB_LOOKUP
+        ):
+            return WEB_LOOKUP_ENGINEERING_PROMPT
 
         prompt = WORKER_SYSTEM_PROMPTS.get(
             worker_role
@@ -787,6 +833,23 @@ Return only the evidence-bounded work product for your active worker role.
             state.job.task
         )
 
+        source_route = route_source(
+            state.job.task
+        )
+
+        if source_route == WEB_LOOKUP:
+            _, retrieval_question = split_source_request(
+                state.job.task
+            )
+
+            external_result = self.external_retriever.retrieve(
+                retrieval_question
+            )
+
+            evidence_packet["external_evidence"] = list(
+                external_result.get("evidence", [])
+                or []
+            )
         transport = evidence_packet.get(
             "transport",
             {},
@@ -894,7 +957,8 @@ Return only the evidence-bounded work product for your active worker role.
             task=state.job.task,
 
             system_prompt=self.system_prompt_for_worker(
-                active_worker
+                active_worker,
+                source_route=source_route,
             ),
 
             context=context,
@@ -1166,11 +1230,3 @@ Return only the evidence-bounded work product for your active worker role.
                     ),
             },
         )
-
-
-
-
-
-
-
-

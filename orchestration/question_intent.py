@@ -25,7 +25,7 @@ def classify_question_intent(question: str) -> QuestionIntent:
     if not q:
         return QuestionIntent("UNKNOWN", "UNRESOLVED")
 
-    if any(
+    explicit_change_comparison = any(
         marker in q
         for marker in (
             "what changed",
@@ -33,13 +33,50 @@ def classify_question_intent(question: str) -> QuestionIntent:
             "difference between",
             "compare ",
         )
+    )
+
+    developmental_multi_time = bool(
+        re.search(
+            r"\bhow\s+(?:did|has|is)\s+.+?\b"
+            r"(?:develop|developed|developing|evolve|evolved|evolving)"
+            r"\b.*?\bfrom\b.+?\b(?:to|into)\b.+",
+            q,
+        )
+    )
+
+    explicit_temporal_bridge = (
+        " from " in q
+        and (
+            " to " in q
+            or " into " in q
+        )
+        and any(
+            marker in q
+            for marker in (
+                "early",
+                "earlier",
+                "previous",
+                "previously",
+                "current",
+                "currently",
+                "now",
+                "today",
+                "later",
+            )
+        )
+    )
+
+    if (
+        explicit_change_comparison
+        or developmental_multi_time
+        or explicit_temporal_bridge
     ):
         return QuestionIntent(
             "CHANGE_COMPARISON",
             "MULTI_TIME",
         )
 
-    if any(
+    explicit_lineage = any(
         marker in q
         for marker in (
             "history of",
@@ -50,6 +87,19 @@ def classify_question_intent(question: str) -> QuestionIntent:
             "how did it evolve",
             "where did it come from",
         )
+    )
+
+    natural_lineage = bool(
+        re.search(
+            r"\bhow\s+did\s+.+?\b"
+            r"(?:develop|evolve)\b",
+            q,
+        )
+    )
+
+    if (
+        explicit_lineage
+        or natural_lineage
     ):
         return QuestionIntent(
             "LINEAGE",
@@ -163,6 +213,39 @@ def classify_question_intent(question: str) -> QuestionIntent:
     ):
         return QuestionIntent(
             "HISTORICAL_EVENT",
+            "HISTORICAL",
+        )
+
+    explicit_record_target = bool(
+        re.search(
+            r"\brecord\s+\d+\b",
+            q,
+        )
+    )
+
+    record_identity_definition = any(
+        marker in q
+        for marker in (
+            "identity",
+            "role",
+            "roles",
+            "function",
+            "functions",
+            "worker",
+            "workers",
+            "definition",
+            "define",
+            "defines",
+            "defined",
+        )
+    )
+
+    if (
+        explicit_record_target
+        and record_identity_definition
+    ):
+        return QuestionIntent(
+            "IDENTITY_DEFINITION",
             "HISTORICAL",
         )
 

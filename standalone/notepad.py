@@ -2113,7 +2113,7 @@ def best_passages(
             (
                 rank,
                 usefulness,
-                sentence[:750]
+                sentence[:3000]
             )
         )
 
@@ -2387,7 +2387,8 @@ def retrieve_pmei(
     records,
     query,
     question,
-    transport=None
+    transport=None,
+    passage_selector=None,
 ):
     evidence = []
 
@@ -2418,12 +2419,13 @@ def retrieve_pmei(
             '?'
         )
 
-        for passage, usefulness in best_passages(
-            text,
-            query,
-            question,
-            3
-        ):
+        selected_passages = (
+            best_passages(text, query, question, 3)
+            if passage_selector is None
+            else passage_selector(record, query, question)
+        )
+        for selected in selected_passages:
+            passage, usefulness = selected[:2]
             evidence.append({
                 'source':
                     'PMEi Record '
@@ -2460,6 +2462,8 @@ def retrieve_pmei(
                         question
                     )['score']
             })
+            if passage_selector is not None:
+                evidence[-1]['activity'] = selected[2]
 
     current_state = current_state_requested(
         question
@@ -2469,6 +2473,7 @@ def retrieve_pmei(
         reverse=True,
         key=lambda item:
             (
+                (1 if item.get('activity', {}).get('position') == 'IN_REQUESTED_WINDOW' else 0),
                 anchor_bonus(
                     item['text'],
                     question

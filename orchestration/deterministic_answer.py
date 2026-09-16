@@ -88,6 +88,48 @@ def render_deterministic_answer(
 
         return "\n".join(lines)
 
+    activity = getattr(packet, "activity_context", {})
+    if activity:
+        lines.extend(["READ-ONLY ACTIVITY CONTEXT", "",
+                      f"Subject: {activity.get('subject')}"])
+        if activity.get("start_date") and activity.get("end_date"):
+            lines.append(f"Requested activity period: {activity['start_date']} to {activity['end_date']}.")
+        else:
+            lines.append("No activity period specified.")
+        lines.append("")
+        if packet.contextual_evidence:
+            for item in packet.contextual_evidence:
+                lines.extend([item, ""])
+        else:
+            lines.extend(["No eligible activity passages were established by this bounded grammatical selection.",
+                          "This does not establish that the subject had no activities.", ""])
+        selection = activity.get("selection", {})
+        lines.append(
+            f"Displayed {len(packet.contextual_evidence)} passages; "
+            f"{selection.get('activity_matching_records', 'unknown')} records contained retained activity candidates."
+        )
+        lines.append(f"Continuity scan exhaustive flag: {activity.get('scan_exhaustive')}. This is not completeness of activity history.")
+        lines.append("Undated passages are relevant context only, not established activities within the requested period.")
+        if activity.get("additional_requested"):
+            lines.append("Previously displayed activities have not been excluded: follow-up result binding is not yet available.")
+        lines.extend(["These are attributed excerpts, not independent verification, current-state proof or authority.",
+                      "No model inference performed."])
+        return "\n".join(lines)
+
+    if getattr(packet, "contextual_recall", False) and packet.contextual_evidence:
+        lines.extend([
+            "READ-ONLY CONTEXT — MATCHED SAVED ANCHOR",
+            "",
+        ])
+        for item in packet.contextual_evidence:
+            lines.extend([item, ""])
+        lines.extend([
+            "These are attributed record excerpts. An anchor match does not "
+            "verify the account, establish current state, or grant authority.",
+            "No model inference performed.",
+        ])
+        return "\n".join(lines)
+
     lines.extend([
         "SUPPORTED EVIDENCE",
         "",

@@ -25,6 +25,8 @@ from orchestration.question_intent import classify_question_intent
 from orchestration.relationship_bridge import translate_governed_evidence
 from orchestration.deterministic_relationship_engine import run_relationship_engine
 from orchestration.evidence_adapter import PMEiEvidenceAdapter
+from orchestration.source_router import WEB_LOOKUP, SOURCE_REQUIRED, route_source, split_source_request
+from orchestration.external_retrieval import ExternalRetriever, render_external_evidence
 from orchestration.evidence_relationship import EvidenceItem
 from orchestration.worker_packet import build_worker_packet_builder
 from orchestration.store import JsonOrchestrationStore
@@ -290,9 +292,9 @@ PAGE = r"""<!doctype html>
 <div class="worker-card knobhead" data-worker="knobhead"><div class="avatar small"><img class="avatar-img" src="/static/cockpit/knobhead.png" alt=""></div><div><div class="worker-name">KNOBHEAD DAVE</div><div class="worker-desc">Adversarial verification. Challenges evidence and claims.</div></div><div class="state {% if current_worker == 'knobhead' and last_run %}active{% endif %}"><span class="dot"></span>{% if current_worker == 'knobhead' and last_run %}LATEST{% else %}IDLE{% endif %}</div><button class="worker-open" onclick="openWorker('knobhead','profile')">OPEN</button></div>
 <div class="worker-card steward" data-worker="steward"><div class="avatar small"><img class="avatar-img" src="/static/cockpit/steward.png" alt=""></div><div><div class="worker-name">STEWARD DAVE</div><div class="worker-desc">Continuity, provenance, lineage and supersession.</div></div><div class="state {% if current_worker == 'steward' and last_run %}active{% endif %}"><span class="dot"></span>{% if current_worker == 'steward' and last_run %}LATEST{% else %}IDLE{% endif %}</div><button class="worker-open" onclick="openWorker('steward','profile')">OPEN</button></div>
 </aside>
-<section class="activity"><div class="activity-title">CURRENT ACTIVITY</div><div class="node"><div class="n1">FOH DAVE</div><div class="n2">Persistent conversation</div></div><div class="patharrow">?</div>{% if last_run %}<div class="node"><div class="n1">{{ last_run.worker|upper }} DAVE</div><div class="n2">{{ last_run.validation }} Â· {{ last_run.provider }} / {{ last_run.model }}</div></div><div class="patharrow">?</div><div class="node pending"><div class="n1">NEXT?</div><div class="n2">Handoff decision pending</div></div>{% else %}<div class="node pending"><div class="n1">ROUTE?</div><div class="n2">FOH decides where work should begin</div></div>{% endif %}</section>
+<section class="activity"><div class="activity-title">CURRENT ACTIVITY</div><div class="node"><div class="n1">FOH DAVE</div><div class="n2">Persistent conversation</div></div><div class="patharrow">?</div>{% if last_run %}<div class="node"><div class="n1">{{ last_run.worker|upper }} DAVE</div><div class="n2">{{ last_run.validation }} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {{ last_run.provider }} / {{ last_run.model }}</div></div><div class="patharrow">?</div><div class="node pending"><div class="n1">NEXT?</div><div class="n2">Handoff decision pending</div></div>{% else %}<div class="node pending"><div class="n1">ROUTE?</div><div class="n2">FOH decides where work should begin</div></div>{% endif %}</section>
 </main></div>
-<div class="modal" id="workerModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div class="avatar small" id="modalAvatar"><div class="avatar-fallback">D</div></div><div><div class="modal-title" id="modalTitle">WORKER</div><div class="sub" id="modalSub"></div></div><button class="close" onclick="closeWorker()">Ã—</button></div><div class="tabs"><button class="tab active" data-tab="profile" onclick="showWorkerTab('profile')">PROFILE</button><button class="tab" data-tab="activity" onclick="showWorkerTab('activity')">ACTIVITY</button><button class="tab" data-tab="conversation" onclick="showWorkerTab('conversation')">TALK TO WORKER</button></div><div class="tabbody" id="workerBody"></div></div></div>
+<div class="modal" id="workerModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div class="avatar small" id="modalAvatar"><div class="avatar-fallback">D</div></div><div><div class="modal-title" id="modalTitle">WORKER</div><div class="sub" id="modalSub"></div></div><button class="close" onclick="closeWorker()">ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬</button></div><div class="tabs"><button class="tab active" data-tab="profile" onclick="showWorkerTab('profile')">PROFILE</button><button class="tab" data-tab="activity" onclick="showWorkerTab('activity')">ACTIVITY</button><button class="tab" data-tab="conversation" onclick="showWorkerTab('conversation')">TALK TO WORKER</button></div><div class="tabbody" id="workerBody"></div></div></div>
 <script>
 const workers={"engineering": {"title": "ENGINEERING DAVE", "role": "Engineering", "function": "Interprets system behaviour and technical facts. Performs bounded engineering work.", "boundary": "No promotion, sealing or human-authority substitution.", "provider": "Nemotron 3 Nano 4B for governed Engineering execution", "escalation": "May recommend Builder, Findings, Governance, Knobhead, Steward or Human Authority as relevant.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/engineering.png\" alt=\"\">"}, "findings": {"title": "FINDINGS DAVE", "role": "Findings", "function": "Extracts and structures observations, gaps and candidate findings.", "boundary": "Findings remain candidate until the required verification and authority path completes.", "provider": "Worker provider is separate from worker identity.", "escalation": "May recommend Engineering, Governance, Knobhead, Steward or Human Authority.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/findings.png\" alt=\"\">"}, "governance": {"title": "GOVERNANCE DAVE", "role": "Governance", "function": "Interprets approved contracts, rules and authority boundaries.", "boundary": "Cannot manufacture Human Authority.", "provider": "Worker provider is separate from worker identity.", "escalation": "May return to originating worker, require Knobhead challenge, or require Human Authority.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/governance.png\" alt=\"\">"}, "builder": {"title": "BUILDER DAVE", "role": "Builder", "function": "Implements bounded build work supplied under approved scope.", "boundary": "No unbounded edits, deployment, sealing or authority expansion.", "provider": "Worker provider is separate from worker identity.", "escalation": "Normally returns build result for Engineering and/or Knobhead verification.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/builder.png\" alt=\"\">"}, "knobhead": {"title": "KNOBHEAD DAVE", "role": "Adversarial Verification", "function": "Independently challenges evidence, claims and candidate acceptance.", "boundary": "Does not promote or build merely because another worker recommends it.", "provider": "Worker provider is separate from worker identity.", "escalation": "May PASS, HOLD, reject a claim, or require another bounded worker/human decision.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/knobhead.png\" alt=\"\">"}, "steward": {"title": "STEWARD DAVE", "role": "Steward", "function": "Maintains continuity, provenance, deduplication, lineage and supersession.", "boundary": "Records validated provenance. Does not manufacture validation.", "provider": "Worker provider is separate from worker identity.", "escalation": "Usually acts after validated provenance or when continuity structure needs review.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/steward.png\" alt=\"\">"}};let selectedWorker='engineering',selectedTab='profile',chatHistory=[],lastPhilMessage='';/* PMEI_ENGINEERING_HANDOFF_STATE_V2_2 */
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function tick(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}tick();setInterval(tick,1000);
@@ -894,7 +896,7 @@ def _foh_pmei_prepare_for_question(question):
 
     adapter = PMEiEvidenceAdapter(
         max_evidence=8,
-        archive_search=False,
+        archive_search=True,
     )
 
     try:
@@ -1466,6 +1468,86 @@ def deterministic_pmei_chat():
 
     started = time.perf_counter()
 
+    source_route = route_source(message)
+    _, message = split_source_request(message)
+    if not message:
+        return {"ok": False, "error": "Please include a question after the source selector."}, 400
+    if source_route == SOURCE_REQUIRED:
+        return {
+            "ok": True,
+            "text": "Should I use your saved continuity or search the web? Repeat the question starting with Continuity: or Web:.",
+            "clarification_required": True,
+            "source_route": SOURCE_REQUIRED,
+            "provider": "deterministic", "model": "none", "llm_used": False,
+            "authority": "none", "pmei_context_used": False,
+            "records_received": 0, "evidence_count": 0, "evidence_record_ids": [],
+        }, 200
+
+    if source_route == WEB_LOOKUP:
+        external_result = ExternalRetriever().retrieve(
+            message
+        )
+
+        if not external_result.get("ok"):
+            return {
+                "ok": False,
+                "error": (
+                    external_result.get("error")
+                    or
+                    "External retrieval produced no evidence."
+                ),
+                "provider": "deterministic",
+                "model": "none",
+                "llm_used": False,
+                "authority": "external_retrieval_only",
+                "source_route": source_route,
+                "pmei_context_used": False,
+                "records_received": 0,
+                "evidence_count": 0,
+                "evidence_record_ids": [],
+                "external_retrieval_connected": False,
+                "external_retrieval_status": external_result.get("error_code") or "PROVIDER_ERROR",
+                "error_code": external_result.get("error_code") or "PROVIDER_ERROR",
+                "external_evidence_count": 0,
+            }, 503
+
+        external_evidence = (
+            external_result.get("evidence")
+            or []
+        )
+
+        text_out = render_external_evidence(
+            external_evidence
+        )
+
+        elapsed_ms = (
+            time.perf_counter()
+            - started
+        ) * 1000
+
+        return {
+            "ok": True,
+            "text": text_out,
+            "provider": "deterministic",
+            "model": "none",
+            "llm_used": False,
+            "authority": "external_retrieval_only",
+            "source_route": source_route,
+            "pmei_context_used": False,
+            "records_received": 0,
+            "evidence_count": 0,
+            "evidence_record_ids": [],
+            "external_retrieval_connected": True,
+            "external_evidence_count": len(external_evidence),
+            "pmei_write_authority": "NONE",
+            "promotion_authority": False,
+            "verification_authority": False,
+            "transition_authority": False,
+            "timing": {
+                "total_ms": round(elapsed_ms, 3),
+            },
+        }
+
     try:
         adapter = PMEiEvidenceAdapter(
             max_evidence=8,
@@ -1566,6 +1648,8 @@ def deterministic_pmei_chat():
             if (
                 deterministic_intent.intent
                 == "IDENTITY_DEFINITION"
+                and deterministic_intent.temporal_scope
+                == "GENERAL"
             ):
                 configured_worker = (
                     _worker_manifest()
@@ -2309,16 +2393,4 @@ if __name__ == "__main__":
         port=5000,
         debug=False,
     )
-
-
-
-
-
-
-
-
-
-
-
-
 

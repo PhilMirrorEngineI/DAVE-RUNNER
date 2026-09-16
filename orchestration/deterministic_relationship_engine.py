@@ -93,6 +93,31 @@ def _extract_exact_date(
         return None
 
 
+def _extract_explicit_record_target(
+    question: str,
+) -> Optional[str]:
+    """
+    Extract an explicitly requested evidence record number.
+
+    This is generic grammatical targeting only. It does not
+    contain or infer any stored record identity.
+    """
+
+    clean = " ".join(
+        str(question or "").lower().split()
+    )
+
+    match = re.search(
+        r"\brecord\s+(\d+)\b",
+        clean,
+    )
+
+    if not match:
+        return None
+
+    return match.group(1)
+
+
 def _timestamp_date(
     timestamp: str,
 ) -> Optional[date]:
@@ -130,12 +155,39 @@ def _apply_subject_binding(
     where evidence that merely mentions a subject must not be
     confused with evidence that defines that subject.
 
+    An explicit "Record N" target is already a direct binding
+    instruction. For historical identity-definition questions,
+    bind to that eligible record instead of treating the record
+    number as the identity subject.
+
     Historical relationship families use subject relevance so that
     evidence about another subject does not survive merely because
     it has the correct relationship type.
     """
 
     if intent.intent == "IDENTITY_DEFINITION":
+        explicit_record_id = (
+            _extract_explicit_record_target(
+                question
+            )
+        )
+
+        if (
+            explicit_record_id is not None
+            and intent.temporal_scope == "HISTORICAL"
+        ):
+            selected = tuple(
+                item
+                for item in evidence
+                if str(item.record_id)
+                == explicit_record_id
+            )
+
+            if selected:
+                return selected
+
+            return ()
+
         return select_subject_bound_evidence(
             question,
             evidence,

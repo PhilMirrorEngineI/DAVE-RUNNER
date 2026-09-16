@@ -87,6 +87,8 @@ class EvidencePacket:
 
     error: str | None = None
 
+    request_context: Dict[str, Any] = field(default_factory=dict)
+
 
 class EvidenceAdapterError(
     RuntimeError
@@ -387,14 +389,51 @@ class PMEiEvidenceAdapter:
                 "question is required"
             )
 
-        query = self.build_query(
-            question
+        from .request_interpretation import interpret_request, text_mentions_subject
+
+        request_context = interpret_request(question)
+        from .request_interpretation import RequestInterpretation
+        from .subject_binding import subject_tokens
+
+        question_intent_for_retrieval = classify_question_intent(question)
+        relationship_activity_context = None
+
+        if question_intent_for_retrieval.intent == "HISTORICAL_EVENT":
+            relationship_terms = subject_tokens(question)
+
+            if relationship_terms:
+                relationship_activity_context = RequestInterpretation(
+                    operation="ACTIVITY_HISTORY",
+                    subject=" ".join(relationship_terms),
+                    subject_terms=relationship_terms,
+                    reference_date=request_context.reference_date,
+                    start_date=None,
+                    end_date=None,
+                    time_basis="EVENT_TIME",
+                    time_expression=None,
+                    additional_requested=False,
+                    clarification=None,
+                )
+        if request_context.operation == "ACTIVITY_HISTORY" and not request_context.ready:
+            return {
+                "ok": False, "stage": "request_interpretation",
+                "question": question, "query": "", "mode": "unresolved",
+                "records": [], "transport": {
+                    "request_interpretation": request_context.as_dict(),
+                }, "candidates": [],
+                "error": "Clarification needed: " + request_context.clarification,
+            }
+
+        effective_request_context = (
+            relationship_activity_context
+            if relationship_activity_context is not None
+            else request_context
         )
 
-        historical = self.historical_scan_requested(
-            question
-        )
+        query = effective_request_context.subject if effective_request_context.ready else self.build_query(question)
+        retrieval_question = effective_request_context.subject if effective_request_context.ready else question
 
+        historical = effective_request_context.ready or self.historical_scan_requested(question)
         mode = (
             "historical"
             if historical
@@ -496,6 +535,10 @@ class PMEiEvidenceAdapter:
         ):
             transport = {}
 
+        if request_context.operation == "ACTIVITY_HISTORY":
+            transport = dict(transport)
+            transport["request_interpretation"] = request_context.as_dict()
+
         if not records:
             return {
                 "ok": False,
@@ -511,14 +554,44 @@ class PMEiEvidenceAdapter:
                 ),
             }
 
+        candidate_records = records
+        if effective_request_context.ready:
+            # A record owner/author is not necessarily its subject. Bind against
+            # its text, retaining Unicode names and word order before stemming.
+            candidate_records = [
+                record for record in records
+                if isinstance(record, dict) and text_mentions_subject(
+                    self.notepad.record_text(record), effective_request_context.subject,
+                )
+            ]
+            transport["subject_matching_records"] = len(candidate_records)
+            transport["activity_time_filter_applied"] = False
+            # Event dates are not substituted with record-save timestamps.
+
+        selection_options = {}
+        if effective_request_context.ready:
+            from .activity_evidence import make_activity_selector
+            from .worker_packet import build_worker_packet_builder
+            counters = dict(authority_excluded_records=0, outside_window_passages=0,
+                            activity_candidate_passages=0, activity_matching_records=0)
+            transport["activity_selection"] = counters
+            transport["activity_time_filter_applied"] = True
+            transport["activity_time_filter_scope"] = "EXPLICIT_LEADING_ACTION_DATE_ONLY"
+            selection_options["passage_selector"] = make_activity_selector(
+                effective_request_context.as_dict(),
+                build_worker_packet_builder().evidence_authority_class,
+                counters,
+            )
+
         try:
             candidates = (
                 self.notepad
                 .retrieve_pmei(
-                    records=records,
+                    records=candidate_records,
                     query=query,
-                    question=question,
+                    question=retrieval_question,
                     transport=transport,
+                    **selection_options,
                 )
             )
 
@@ -600,6 +673,7 @@ class PMEiEvidenceAdapter:
                 question=question,
                 query=query,
                 transport=transport,
+                request_context=dict(transport.get("request_interpretation", {})),
                 records_received=len(records),
                 evidence_count=0,
                 retrieval_ok=False,
@@ -723,6 +797,26 @@ class PMEiEvidenceAdapter:
                 evidence_role = "GENERAL_EVIDENCE"
 
             prepared_item = {
+                "activity": dict(item.get("activity") or {}),
+                # Source-owned recall anchors and restrictions travel with evidence.
+                "anchor_points": [
+                    value for value in (record.get("anchor_points") or [])
+                    if isinstance(value, str) and value.strip()
+                ] if isinstance(record.get("anchor_points"), list) else [],
+                "active_constraints": [
+                    value for value in (record.get("active_constraints") or [])
+                    if isinstance(value, str) and value.strip()
+                ] if isinstance(record.get("active_constraints"), list) else [],
+
+                # Source-owned governed learning metadata survives projection.
+                # Preservation here does not promote learning into evidence,
+                # current state, relationship qualification, or instruction.
+                "learning_layer": (
+                    dict(record.get("learning_layer") or {})
+                    if isinstance(record.get("learning_layer"), dict)
+                    else {}
+                ),
+
                 # -------------------------------------------------------------
                 # Retrieval provenance
                 # -------------------------------------------------------------
@@ -1207,9 +1301,72 @@ class PMEiEvidenceAdapter:
                     :self.max_evidence
                 ]
         else:
-            bounded = ordered[
-                :self.max_evidence
-            ]
+            # Preserve one substantive, authority-eligible governed-learning
+            # source in the bounded packet when one exists deeper in the
+            # already-qualified candidate surface.
+            #
+            # This changes bounded portfolio coverage only. It does not alter
+            # task alignment, proposition type, temporal scope, evidence
+            # authority, or current-state eligibility.
+            from .worker_packet import build_worker_packet_builder
+
+            authority_class = (
+                build_worker_packet_builder()
+                .evidence_authority_class
+            )
+
+            learning_item = next(
+                (
+                    item
+                    for item in ordered
+                    if (
+                        isinstance(
+                            item.get(
+                                "learning_layer"
+                            ),
+                            dict,
+                        )
+                        and
+                        any(
+                            bool(value)
+                            for value in item[
+                                "learning_layer"
+                            ].values()
+                        )
+                        and
+                        authority_class(item)
+                        in {
+                            "LAWFUL_EVIDENCE",
+                            "READ_ONLY_EVIDENCE",
+                        }
+                    )
+                ),
+                None,
+            )
+
+            if (
+                learning_item is not None
+                and
+                self.max_evidence > 0
+                and
+                learning_item
+                not in ordered[
+                    :self.max_evidence
+                ]
+            ):
+                bounded = (
+                    ordered[
+                        :self.max_evidence - 1
+                    ]
+                    +
+                    [
+                        learning_item
+                    ]
+                )
+            else:
+                bounded = ordered[
+                    :self.max_evidence
+                ]
 
         for item in bounded:
             item.pop(
@@ -1226,6 +1383,8 @@ class PMEiEvidenceAdapter:
 
             transport=transport,
 
+            request_context=dict(transport.get("request_interpretation", {})),
+
             records_received=len(
                 records
             ),
@@ -1235,12 +1394,12 @@ class PMEiEvidenceAdapter:
             ),
 
             retrieval_ok=bool(
-                bounded
+                bounded or transport.get("request_interpretation", {}).get("ready")
             ),
 
             error=(
                 ""
-                if bounded
+                if bounded or transport.get("request_interpretation", {}).get("ready")
                 else
                 "No relevant PMEi evidence found."
             ),

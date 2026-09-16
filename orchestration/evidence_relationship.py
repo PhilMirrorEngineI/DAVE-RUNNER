@@ -13,6 +13,9 @@ class EvidenceItem:
     authority_eligible: bool = True
     timestamp: str = ""
     evidence_role: str = ""
+    relationship_qualification: str = ""
+    event_time_position: str = ""
+    event_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,9 @@ def evidence_permitted_for_intent(
     kind = _upper(item.evidence_kind)
     time = _upper(item.temporal_scope)
     role = _upper(item.evidence_role)
+    qualification = _upper(
+        item.relationship_qualification
+    )
 
     if intent.intent == "IDENTITY_DEFINITION":
         return kind in {
@@ -52,8 +58,14 @@ def evidence_permitted_for_intent(
 
     if intent.intent == "HISTORICAL_EVENT":
         return (
-            kind == "EVENT"
-            and time == "HISTORICAL"
+            (
+                kind == "EVENT"
+                and time == "HISTORICAL"
+            )
+            or (
+                qualification == "ATTRIBUTED_ACTION_CANDIDATE"
+
+            )
         )
 
     if intent.intent == "CURRENT_STATE":

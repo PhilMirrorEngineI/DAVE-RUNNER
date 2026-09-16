@@ -202,4 +202,16 @@ def translate_evidence_item(
             item.get("evidence_role")
             or ""
         ).strip(),
+        relationship_qualification=str(
+            (item.get("activity") or {}).get("relation")
+            or ""
+        ).strip(),
+        event_time_position=str(
+            (item.get("activity") or {}).get("position")
+            or ""
+        ).strip(),
+        event_date=str(
+            (item.get("activity") or {}).get("event_date")
+            or ""
+        ).strip(),
     )

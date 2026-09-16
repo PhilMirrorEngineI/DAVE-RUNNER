@@ -108,10 +108,22 @@ class WorkerPacket:
         default_factory=list
     )
 
+
+    # Governed learning is carried separately from evidence/state.
+    # It must never be promoted into supported_state or contextual_evidence.
+    governed_learning: Dict[str, Any] = field(
+        default_factory=dict
+    )
     contextual_evidence: List[str] = field(
         default_factory=list
     )
 
+    # External sourced evidence is retrieval-only context.
+    # It is not PMEi evidence and must never be promoted into
+    # supported_state, contextual_evidence, or PMEi authority.
+    external_evidence: List[Dict[str, Any]] = field(
+        default_factory=list
+    )
     evidence_positions: List[Dict[str, Any]] = field(
         default_factory=list
     )
@@ -127,6 +139,10 @@ class WorkerPacket:
     rendered_text: str = ""
 
     error: str = ""
+
+    contextual_recall: bool = False
+
+    activity_context: Dict[str, Any] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -756,7 +772,7 @@ class PMEiWorkerPacketBuilder:
                 "record_id"
             )
 
-            
+
             authority_class = (
                 self.evidence_authority_class(
                     item
@@ -1155,6 +1171,58 @@ class PMEiWorkerPacketBuilder:
 
         lines.extend([
             "",
+            "GOVERNED LEARNING: NOT CURRENT-STATE EVIDENCE",
+            (
+                "Governed learning may inform reasoning about the current task, "
+                "but does not by itself establish fact, current state, authority, "
+                "or required action."
+            ),
+        ])
+
+        if packet.governed_learning:
+
+            for key, value in packet.governed_learning.items():
+
+                lines.append(
+                    f"- {key}: {value}"
+                )
+
+        else:
+
+            lines.append(
+                "- none"
+            )
+        lines.extend([
+            "",
+            "EXTERNAL SOURCED EVIDENCE - RETRIEVAL ONLY / NOT PMEi AUTHORITY:",
+            (
+                "External evidence may inform reasoning, but does not by itself "
+                "establish PMEi fact, current state, authority, or required action."
+            ),
+        ])
+
+        if packet.external_evidence:
+
+            for item in packet.external_evidence:
+
+                source = self.clean_text(item.get("source"))
+                url = self.clean_text(item.get("url"))
+                retrieval_type = self.clean_text(item.get("retrieval_type"))
+                text_value = self.clean_text(item.get("text"))
+
+                lines.append(
+                    f"- {source} | {retrieval_type or 'EXTERNAL_RETRIEVAL'} | "
+                    f"{url or 'URL_UNAVAILABLE'} | {text_value}"
+                )
+
+        else:
+
+            lines.append(
+                "- none"
+            )
+
+        lines.extend([
+            "",
             "CONTEXTUAL EVIDENCE ? NOT CURRENT-STATE PROOF:",
         ])
 
@@ -1275,6 +1343,85 @@ class PMEiWorkerPacketBuilder:
     # BUILD
     # -------------------------------------------------------------------------
 
+    def select_contextual_recall(
+        self,
+        worker_role: str,
+        task: str,
+        evidence: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Quote admitted records matching a saved cue; never qualify state.
+
+        This is deliberately an exact saved-anchor lookup for UNKNOWN inputs.
+        It is not semantic recall, source verification, or a relationship family.
+        Multiple matching records remain separately attributed.
+        """
+        from .question_intent import classify_question_intent
+
+        if worker_role != "foh":
+            return []
+        if classify_question_intent(task).intent != "UNKNOWN":
+            return []
+
+        def words(value):
+            return tuple(re.findall(r"\w+", str(value or "").casefold()))
+
+        cue = words(task)
+        if not cue:
+            return []
+
+        result = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            authority = self.evidence_authority_class(item)
+            if authority not in {"LAWFUL_EVIDENCE", "READ_ONLY_EVIDENCE"}:
+                continue
+            if item.get("record_id") is None:
+                continue
+            anchors = item.get("anchor_points")
+            if not isinstance(anchors, list):
+                continue
+            if not any(isinstance(a, str) and words(a) == cue for a in anchors):
+                continue
+            passage = self.clean_text(item.get("text"))
+            passage_words = words(passage)
+            if not any(
+                passage_words[i:i + len(cue)] == cue
+                for i in range(len(passage_words) - len(cue) + 1)
+            ):
+                continue
+
+            # Retain the bounded passage, including restrictions in its prose.
+            # Do not replace it with a generated paraphrase or first sentence.
+            source = (
+                f"PMEi Record {item['record_id']} | {authority} | "
+                f"session={self.clean_text(item.get('session_ref')) or 'unspecified'} | "
+                f"user={self.clean_text(item.get('user_id')) or 'unspecified'} | "
+                f"recorded={self.clean_text(item.get('timestamp')) or 'unspecified'}"
+            )
+            title = self.clean_text(item.get("human_title"))
+            position = (
+                f"{self.clean_text(item.get('task_alignment'))} | "
+                f"{self.clean_text(item.get('proposition_type'))} | "
+                f"{self.clean_text(item.get('temporal_scope'))} | "
+                f"{self.evidence_state_support_class(item)}"
+            )
+            entry = (
+                f"[{source}] {title}\n"
+                f"Saved passage (quoted): {passage}\n"
+                f"Evidence position (unchanged): {position}"
+            )
+            constraints = item.get("active_constraints")
+            if isinstance(constraints, list):
+                restrictions = [
+                    self.clean_text(value) for value in constraints
+                    if isinstance(value, str) and value.strip()
+                ]
+                if restrictions:
+                    entry += "\nRecorded restrictions: " + " | ".join(restrictions)
+            result.append(entry)
+        return result
+
     def build(
         self,
         worker_role: str,
@@ -1314,6 +1461,52 @@ class PMEiWorkerPacketBuilder:
 
             evidence_packet = {}
 
+        # Preserve externally sourced retrieval as a distinct,
+        # non-PMEi, non-authoritative packet lane.
+        external_evidence = []
+
+        for external_item in evidence_packet.get("external_evidence", []) or []:
+            if not isinstance(external_item, dict):
+                continue
+
+            text_value = self.clean_text(
+                external_item.get("text")
+            )
+
+            source = self.clean_text(
+                external_item.get("source")
+            )
+
+            if not text_value or not source:
+                continue
+
+            external_evidence.append(
+                dict(external_item)
+            )
+        # Preserve source-owned governed learning as a distinct packet lane.
+        # This is continuity/learning metadata, not supported current state.
+        governed_learning = {}
+
+        for learning_item in evidence_packet.get("evidence", []) or []:
+            if not isinstance(learning_item, dict):
+                continue
+
+            learning_layer = learning_item.get("learning_layer")
+
+            if isinstance(learning_layer, dict) and learning_layer:
+                record_id = learning_item.get("record_id")
+                source_key = (
+                    f"PMEi Record {record_id}"
+                    if record_id is not None
+                    else "PMEi Record unknown"
+                )
+
+                governed_learning[source_key] = {
+                    "authority": self.evidence_authority_class(
+                        learning_item
+                    ),
+                    "learning_layer": dict(learning_layer),
+                }
         evidence = evidence_packet.get(
             "evidence"
         )
@@ -1528,8 +1721,62 @@ class PMEiWorkerPacketBuilder:
                     )
 
 
+        recall_evidence = self.select_contextual_recall(
+            worker_role, task, evidence,
+        ) if evidence_packet.get("retrieval_ok", False) else []
+        if recall_evidence:
+            contextual_evidence = recall_evidence
+
+        activity_context = {}
+        transport = evidence_packet.get("transport") or {}
+        request_context = transport.get("request_interpretation") or {}
+        if worker_role == "foh" and request_context.get("ready") and request_context.get("operation") == "ACTIVITY_HISTORY":
+            activity_context = dict(request_context)
+            activity_context["selection"] = dict(transport.get("activity_selection") or {})
+            activity_context["scan_exhaustive"] = transport.get("exhaustive")
+            activity_context["records_received"] = evidence_packet.get("records_received", 0)
+            contextual_evidence = []
+            recall_evidence = []
+            for item in evidence:
+                activity = item.get("activity") or {}
+                if activity.get("relation") != "ATTRIBUTED_ACTION_CANDIDATE":
+                    continue
+                if self.evidence_authority_class(item) not in {"READ_ONLY_EVIDENCE", "LAWFUL_EVIDENCE"}:
+                    continue
+                if activity.get("position") == "OUTSIDE_REQUESTED_WINDOW":
+                    continue
+                text_value = self.clean_text(item.get("text"))
+                if text_value != self.clean_text(activity.get("text")):
+                    continue
+                event_date = activity.get("event_date")
+                date_label = (
+                    f"Explicit activity date: {event_date}"
+                    if event_date else
+                    "Activity date unresolved; inclusion in the requested period is NOT established"
+                )
+                entry = (
+                    f"[PMEi Record {item.get('record_id')} | "
+                    f"{self.evidence_authority_class(item)} | "
+                    f"session={self.clean_text(item.get('session_ref'))} | "
+                    f"source field={activity.get('source_field')}]\n"
+                    f"{date_label}.\n"
+                    f"Record states (quoted): {text_value}\n"
+                    f"Record saved: {self.clean_text(item.get('timestamp'))} "
+                    "(not substituted for activity date)."
+                )
+                restrictions = item.get("active_constraints") or []
+                if isinstance(restrictions, list) and restrictions:
+                    entry += "\nRecorded restrictions: " + " | ".join(
+                        self.clean_text(x) for x in restrictions if isinstance(x, str)
+                    )
+                contextual_evidence.append(entry)
+
         packet = WorkerPacket(
+            activity_context=activity_context,
+            contextual_recall=bool(recall_evidence),
             worker_role=worker_role,
+
+            governed_learning=governed_learning,
 
             task=task,
 
@@ -1649,6 +1896,8 @@ class PMEiWorkerPacketBuilder:
 
             contextual_evidence=contextual_evidence,
 
+            external_evidence=external_evidence,
+
             evidence_positions=[
                 {
                     "record_id":
@@ -1726,3 +1975,9 @@ def build_worker_packet_builder(
     return PMEiWorkerPacketBuilder(
         max_supported=max_supported
     )
+
+
+
+
+
+

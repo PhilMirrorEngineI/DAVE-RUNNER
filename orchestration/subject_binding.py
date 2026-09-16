@@ -259,6 +259,35 @@ def _subject_phrase(
     return " ".join(terms)
 
 
+def _term_matches_text_tokens(
+    term: str,
+    text_tokens: set,
+) -> bool:
+    """
+    Match a subject token against evidence tokens.
+
+    Exact spelling always wins.
+
+    If exact spelling is absent, allow a trailing-s form to match
+    the otherwise identical token. This safely handles apostrophe-
+    omitted possessives such as "Daves worker role" -> "Dave"
+    without rewriting genuine names such as "James" when "James"
+    itself is present in the evidence.
+    """
+
+    if term in text_tokens:
+        return True
+
+    if (
+        len(term) > 1
+        and term.endswith("s")
+        and term[:-1] in text_tokens
+    ):
+        return True
+
+    return False
+
+
 def _coverage(
     terms: Tuple[str, ...],
     text: str,
@@ -273,7 +302,10 @@ def _coverage(
     matched = sum(
         1
         for term in terms
-        if term in text_tokens
+        if _term_matches_text_tokens(
+            term,
+            text_tokens,
+        )
     )
 
     return matched / len(terms)
@@ -470,7 +502,10 @@ def select_subject_relevant_evidence(
             )
         )
 
-        if primary_term not in text_tokens:
+        if not _term_matches_text_tokens(
+            primary_term,
+            text_tokens,
+        ):
             continue
 
         selected.append(

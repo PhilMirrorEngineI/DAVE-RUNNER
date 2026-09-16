@@ -75,9 +75,22 @@ def _render_supported(
     lines = []
 
     for item in evidence:
-        lines.append(
-            f"- [{item.record_id}] {item.text}"
-        )
+        if item.relationship_qualification:
+            qualification = item.relationship_qualification
+            time_position = item.event_time_position or "UNRESOLVED"
+            event_date = item.event_date or "UNRESOLVED"
+
+            lines.append(
+                f"- [{item.record_id}] "
+                f"QUALIFICATION: {qualification} | "
+                f"EVENT TIME POSITION: {time_position} | "
+                f"EVENT DATE: {event_date} | "
+                f"{item.text}"
+            )
+        else:
+            lines.append(
+                f"- [{item.record_id}] {item.text}"
+            )
 
     return "\n".join(lines)
 
