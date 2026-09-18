@@ -2031,7 +2031,7 @@ def question_echo_reject(
 @lru_cache(maxsize=8192)
 def _passage_pieces_cached(text):
     pieces = re.split(
-        r'\\n+|(?<=[.!?])(?:[\\\'\"??])?\\s+',
+        r'\n+|(?<=[.!?])(?:[\'"??])?\s+',
         text
     )
 
@@ -2492,20 +2492,29 @@ def retrieve_pmei(
     # surface. A continuity record may produce several useful passages,
     # but it must not consume multiple candidate slots before downstream
     # qualification and authority checks.
-    diverse_evidence = []
-    seen_record_ids = set()
+    selected_record_ids = []
 
     for item in evidence:
         record_id = item.get('record_id')
 
-        if record_id in seen_record_ids:
+        if record_id in selected_record_ids:
             continue
 
-        seen_record_ids.add(record_id)
-        diverse_evidence.append(item)
+        selected_record_ids.append(record_id)
 
-        if len(diverse_evidence) >= 20:
+        if len(selected_record_ids) >= 20:
             break
+
+    selected_record_ids = set(
+        selected_record_ids
+    )
+
+    diverse_evidence = [
+        item
+        for item in evidence
+        if item.get('record_id')
+        in selected_record_ids
+    ]
 
     for item in diverse_evidence:
         item.pop(

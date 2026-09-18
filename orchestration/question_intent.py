@@ -44,25 +44,19 @@ def classify_question_intent(question: str) -> QuestionIntent:
         )
     )
 
-    explicit_temporal_bridge = (
-        " from " in q
-        and (
-            " to " in q
-            or " into " in q
-        )
-        and any(
-            marker in q
-            for marker in (
-                "early",
-                "earlier",
-                "previous",
-                "previously",
-                "current",
-                "currently",
-                "now",
-                "today",
-                "later",
-            )
+    temporal_marker = (
+        r"(?:early|earlier|previous|previously|"
+        r"current|currently|now|today|later)"
+    )
+
+    explicit_temporal_bridge = bool(
+        re.search(
+            rf"\bfrom\b[^.!?]*\b{temporal_marker}\b"
+            rf"[^.!?]*\b(?:to|into)\b[^.!?]*"
+            rf"|"
+            rf"\bfrom\b[^.!?]*\b(?:to|into)\b"
+            rf"[^.!?]*\b{temporal_marker}\b",
+            q,
         )
     )
 

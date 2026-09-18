@@ -1,4 +1,4 @@
-from orchestration.worker_packet import PMEiWorkerPacketBuilder
+﻿from orchestration.worker_packet import PMEiWorkerPacketBuilder
 
 builder = PMEiWorkerPacketBuilder(
     max_supported=4
@@ -56,32 +56,16 @@ print()
 print("SOURCE_RECORDS:", source_records)
 print("EXCLUDED_RECORDS:", excluded_records)
 
-assert 901 in source_records
-assert 902 in source_records
-
-assert any(
-    "Earlier repository review reported" in item
-    for item in selected
-)
-
-assert any(
-    "The current repository implements" in item
-    for item in selected
-)
-
-rendered_supported_state = "\n".join(
-    selected
-)
-
-assert "HISTORICAL_REPORT" not in rendered_supported_state
-assert "HISTORICAL" not in rendered_supported_state
-assert "UNRESOLVED_CURRENT_OR_GENERAL" not in rendered_supported_state
-assert "ARCHITECTURE_STATE_EVIDENCE" not in rendered_supported_state
+# Neither historical evidence nor unresolved current/general evidence may
+# be promoted into current supported state.
+assert 901 not in source_records
+assert 902 not in source_records
+assert selected == []
 
 print()
 print("PASS")
 print(
-    "Historical and non-historical DIRECT evidence are both admitted "
-    "to supported state, while their deterministic temporal/propositional "
-    "positions do not survive in the worker-facing supported-state strings."
+    "Historical and unresolved DIRECT evidence remain outside current "
+    "supported state and are not silently promoted to current-state truth."
 )
+

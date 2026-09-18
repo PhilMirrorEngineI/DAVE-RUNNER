@@ -1,4 +1,4 @@
-from orchestration import webapp
+﻿from orchestration import webapp
 
 
 QUESTION = "How would Dave approach diagnosing a broken washing machine?"
@@ -20,6 +20,22 @@ def test_deterministic_chat_routes_external_question_before_pmei(
                 "PMEiEvidenceAdapter must not be constructed "
                 "for a WEB_LOOKUP question."
             )
+
+    class UnavailableExternalRetriever:
+        def retrieve(self, question):
+            return {
+                "ok": False,
+                "mode": "web",
+                "error": "External retrieval unavailable.",
+                "evidence": [],
+            }
+
+    monkeypatch.setattr(
+        webapp,
+        "ExternalRetriever",
+        UnavailableExternalRetriever,
+        raising=False,
+    )
 
     monkeypatch.setattr(
         webapp,

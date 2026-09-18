@@ -50,6 +50,7 @@ class ProviderRequest:
     model: str = ""
     temperature: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    output_schema: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -382,6 +383,11 @@ Do not manufacture human approval."""
                 ),
             },
         }
+
+        if request.output_schema is not None:
+            if not isinstance(request.output_schema, dict) or not request.output_schema:
+                raise ProviderError("output_schema must be a non-empty JSON schema object.")
+            payload["format"] = request.output_schema
 
         try:
             response = requests.post(

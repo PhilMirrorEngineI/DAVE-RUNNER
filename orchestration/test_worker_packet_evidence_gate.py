@@ -1,4 +1,4 @@
-from orchestration.worker_packet import (
+﻿from orchestration.worker_packet import (
     build_worker_packet_builder,
 )
 
@@ -67,6 +67,7 @@ def test_compound_read_only_seal_is_supported_state_eligible_when_direct():
                     "NOT DEPLOYED OR CANONICAL"
                 ),
                 "task_alignment": "DIRECT",
+                "temporal_scope": "CURRENT",
                 "text": (
                     "The locally working and tested portion is the "
                     "FOH to Engineering reference slice through port 5000."

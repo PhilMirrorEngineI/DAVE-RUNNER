@@ -122,3 +122,17 @@ def test_accepts_unverified_analysis_when_packet_has_no_supported_state():
     output = "ENGINEERING ANALYSIS\n- UNVERIFIED: The supplied packet does not establish what PMEi means.\n"
     result = validator.validate(output, packet)
     assert result.status == "ACCEPT"
+
+def test_accepts_no_current_verified_state_as_explicitly_unverified():
+    validator = build_output_validator()
+
+    claim = "No current-verified state exists for the motor's recoverability."
+
+    result = validator.validate(
+        output_text=claim,
+        worker_packet_text=PACKET,
+    )
+
+    assert result.ok is True
+    assert result.status == "ACCEPT"
+    assert result.issues == []

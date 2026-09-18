@@ -1,4 +1,4 @@
-"""Offline contracts for attributed saved-anchor recall; no network or LLM."""
+﻿"""Offline contracts for attributed saved-anchor recall; no network or LLM."""
 import unittest
 from copy import deepcopy
 from orchestration.evidence_adapter import PMEiEvidenceAdapter
@@ -60,7 +60,7 @@ class TestContextualAnchorRecall(unittest.TestCase):
         assert build(p, cue).contextual_recall
 
     def test_generic_cues_and_punctuation_02(self):
-        cue, anchor = ('caffè verde', 'caffè verde')
+        cue, anchor = ('caffÃ¨ verde', 'caffÃ¨ verde')
         p = prepare(cue, [record(anchor=anchor)], [{'record_id': 9001, 'text': f'A memory of {anchor}.'}])
         assert build(p, cue).contextual_recall
 
@@ -170,6 +170,54 @@ class TestContextualAnchorRecall(unittest.TestCase):
         assert any(('Identity, Lineage, Evidence, State and Session' in item for item in packet.contextual_evidence))
         assert all(('Record 264' not in item for item in packet.supported_state))
 
+    def test_foh_historical_analysis_carries_direct_historical_text_without_state_promotion(self):
+        task = (
+            "Review PMEi continuity and find one concrete example where we repeated work, "
+            "misunderstood an earlier decision, or proposed something that already existed."
+        )
+
+        evidence = [
+            dict(
+                record_id=261,
+                seal='READ ONLY',
+                session_ref='pmei_engineering',
+                task_alignment='DIRECT',
+                proposition_type='HISTORICAL_REPORT',
+                temporal_scope='HISTORICAL',
+                evidence_role='ARCHITECTURE_STATE_EVIDENCE',
+                text=(
+                    'Historical account: an earlier PMEi implementation already contained '
+                    'the capability that was later proposed again.'
+                ),
+            )
+        ]
+
+        packet = build_worker_packet_builder().build(
+            worker_role='foh',
+            task=task,
+            evidence_packet={
+                'retrieval_ok': True,
+                'evidence': evidence,
+            },
+        )
+
+        assert not packet.contextual_recall
+        assert not packet.supported_state
+
+        assert packet.evidence_positions[0]['state_support'] == (
+            'HISTORICAL_CONTEXT_ONLY'
+        )
+
+        assert any(
+            'Historical account: an earlier PMEi implementation already contained'
+            in item
+            for item in packet.contextual_evidence
+        )
+
+        assert any(
+            'PMEi Record 261' in item
+            for item in packet.contextual_evidence
+        )
     def test_adapter_preserves_metadata_as_separate_lists(self):
         source = record()
         p = prepare(records=[source])
@@ -178,3 +226,4 @@ class TestContextualAnchorRecall(unittest.TestCase):
         assert p.evidence[0]['anchor_points'] is not source['anchor_points']
 if __name__ == '__main__':
     unittest.main()
+

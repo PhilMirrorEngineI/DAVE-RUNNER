@@ -312,6 +312,8 @@ class WorkerOutputValidator:
             or
             "not verified" in lower
             or
+            "no current-verified state" in lower
+            or
             "not established" in lower
             or
             "no evidence" in lower

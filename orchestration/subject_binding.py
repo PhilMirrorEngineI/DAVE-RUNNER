@@ -491,8 +491,6 @@ def select_subject_relevant_evidence(
     if not terms:
         return ()
 
-    primary_term = terms[0]
-
     selected = []
 
     for item in evidence:
@@ -502,9 +500,25 @@ def select_subject_relevant_evidence(
             )
         )
 
-        if not _term_matches_text_tokens(
-            primary_term,
-            text_tokens,
+        matched_terms = tuple(
+            term
+            for term in terms
+            if _term_matches_text_tokens(
+                term,
+                text_tokens,
+            )
+        )
+
+        if not matched_terms:
+            continue
+
+        # A compound subject must not collapse to its first token.
+        # Require the complete subject when multiple subject terms
+        # were extracted. Single-token subjects retain the existing
+        # behaviour.
+        if (
+            len(terms) > 1
+            and len(matched_terms) != len(terms)
         ):
             continue
 

@@ -1,4 +1,4 @@
-from html.parser import HTMLParser
+﻿from html.parser import HTMLParser
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -164,7 +164,7 @@ def _brave_key(env_path=None):
     """Read this credential only; never export or log .env contents."""
     import os
     from pathlib import Path
-    value = os.environ.get("BRAVE_API_KEY")
+    value = os.environ.get("BRAVE_API_KEY") or os.environ.get("BRAVE_SEARCH_API_KEY")
     if value is not None:
         return value.strip()
     path = Path(env_path) if env_path is not None else Path(__file__).resolve().parent.parent / ".env"
@@ -412,6 +412,7 @@ def render_external_evidence(evidence):
         lines.append(f"EVIDENCE: {text}")
 
     return "\n".join(lines)
+
 
 
 

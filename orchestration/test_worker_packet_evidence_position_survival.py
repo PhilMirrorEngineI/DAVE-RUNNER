@@ -1,4 +1,4 @@
-from orchestration.evidence_adapter import PMEiEvidenceAdapter
+﻿from orchestration.evidence_adapter import PMEiEvidenceAdapter
 from orchestration.worker_packet import PMEiWorkerPacketBuilder
 
 QUESTION = (
@@ -95,9 +95,14 @@ assert by_id[902]["proposition_type"] == "TOPIC_ONLY"
 assert by_id[902]["temporal_scope"] == "UNRESOLVED_CURRENT_OR_GENERAL"
 assert by_id[902]["evidence_role"] == "ARCHITECTURE_STATE_EVIDENCE"
 
-assert 901 in packet.source_records
-assert 902 in packet.source_records
-assert packet.evidence_sufficient is True
+# Historical and unresolved evidence must survive position classification
+# without being promoted into current supported state.
+assert by_id[901]["state_support"] == "HISTORICAL_CONTEXT_ONLY"
+assert by_id[902]["state_support"] == "CURRENT_STATE_UNRESOLVED"
+
+assert 901 not in packet.source_records
+assert 902 not in packet.source_records
+assert packet.evidence_sufficient is False
 
 print()
 print("PASS")
@@ -105,3 +110,4 @@ print(
     "Evidence-position coordinates survive adapter -> WorkerPacket "
     "without changing existing supported-state admission."
 )
+

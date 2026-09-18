@@ -1,4 +1,4 @@
-"""
+﻿"""
 PMEi DETERMINISTIC WORKER PACKET
 
 Purpose
@@ -1721,6 +1721,82 @@ class PMEiWorkerPacketBuilder:
                     )
 
 
+        # -----------------------------------------------------------------
+        # FOH DIRECT HISTORICAL CONTEXT
+        # -----------------------------------------------------------------
+        #
+        # DIRECT historical evidence may inform FOH historical analysis.
+        # It remains contextual evidence only and is never promoted into
+        # SUPPORTED STATE or current-state truth.
+        #
+        # This does not alter task_alignment, temporal_scope, state_support,
+        # contextual recall, qualification, or authority.
+        # -----------------------------------------------------------------
+
+        if worker_role == "foh":
+
+            for item in evidence:
+
+                if not isinstance(item, dict):
+                    continue
+
+                authority_class = self.evidence_authority_class(item)
+
+                if authority_class not in {
+                    "LAWFUL_EVIDENCE",
+                    "READ_ONLY_EVIDENCE",
+                }:
+                    continue
+
+                task_alignment = self.clean_text(
+                    item.get("task_alignment")
+                ).upper()
+
+                if task_alignment != "DIRECT":
+                    continue
+
+                state_support = self.evidence_state_support_class(item)
+
+                if state_support != "HISTORICAL_CONTEXT_ONLY":
+                    continue
+
+                text_value = self.clean_text(item.get("text"))
+
+                if not text_value:
+                    continue
+
+                sentences = self.sentences(text_value)
+
+                contextual_text = (
+                    sentences[0]
+                    if sentences
+                    else text_value
+                )
+
+                if len(contextual_text) > self.max_sentence_chars:
+                    contextual_text = (
+                        contextual_text[:self.max_sentence_chars].rstrip()
+                        + "..."
+                    )
+
+                record_id = item.get("record_id")
+
+                if record_id is None:
+                    contextual_evidence.append(
+                        f"[{authority_class} | "
+                        f"{task_alignment} | "
+                        f"{state_support}] "
+                        f"{contextual_text}"
+                    )
+                else:
+                    contextual_evidence.append(
+                        f"[PMEi Record {record_id} | "
+                        f"{authority_class} | "
+                        f"{task_alignment} | "
+                        f"{state_support}] "
+                        f"{contextual_text}"
+                    )
+
         recall_evidence = self.select_contextual_recall(
             worker_role, task, evidence,
         ) if evidence_packet.get("retrieval_ok", False) else []
@@ -1975,6 +2051,7 @@ def build_worker_packet_builder(
     return PMEiWorkerPacketBuilder(
         max_supported=max_supported
     )
+
 
 
 

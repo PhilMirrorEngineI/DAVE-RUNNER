@@ -100,6 +100,58 @@ def test_knobhead_cannot_manufacture_human_gate():
     assert len(after.history) == 2
 
 
+
+class FakeGoodArchitectureProvider(BaseProvider):
+    provider_name = "fake"
+
+    def execute(self, request):
+        return ProviderResponse(
+            ok=True,
+            provider="fake",
+            model="none",
+            output_text=(
+                "No supported architectural boundary can be "
+                "established from the bounded evidence."
+            ),
+            error="",
+            metadata={
+                "fake_test": True,
+            },
+        )
+
+
+def test_accepted_output_retains_validation_status():
+    temp_dir = tempfile.TemporaryDirectory()
+
+    engine = OrchestrationEngine(
+        store=JsonOrchestrationStore(
+            Path(temp_dir.name)
+        ),
+        restore_existing=False,
+    )
+
+    job_id = "architecture-validator-accept-regression"
+
+    engine.create_job(
+        OrchestrationJob(
+            job_id=job_id,
+            task="Review bounded architectural evidence.",
+            requested_worker="architecture",
+        )
+    )
+
+    executor = WorkerExecutor(
+        engine,
+        FakeGoodArchitectureProvider(),
+    )
+
+    result = executor.execute(job_id)
+
+    assert result.ok is True
+    assert result.metadata["validation_status"] == "ACCEPT"
+    assert result.metadata["orchestration_state_changed"] is False
+    assert result.metadata["transition_authority"] is False
+
 def run_tests():
     test_knobhead_cannot_manufacture_human_gate()
 
@@ -110,3 +162,4 @@ def run_tests():
 
 if __name__ == "__main__":
     run_tests()
+

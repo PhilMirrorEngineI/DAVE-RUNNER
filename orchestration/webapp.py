@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from collections import deque
 from datetime import datetime
 import threading
@@ -17,8 +18,10 @@ from flask import Flask, redirect, render_template_string, request, url_for
 
 from orchestration.contracts import OrchestrationJob
 from orchestration.engine import OrchestrationEngine
+from orchestration.workers import get_worker
 from orchestration.executor import WorkerExecutor
 from orchestration.providers import OllamaProvider
+from orchestration.foh_initial_request import InitialRequestError, propose_initial_request
 from orchestration.output_validator import WorkerOutputValidator
 from orchestration.deterministic_answer import render_deterministic_answer
 from orchestration.question_intent import classify_question_intent
@@ -30,6 +33,15 @@ from orchestration.external_retrieval import ExternalRetriever, render_external_
 from orchestration.evidence_relationship import EvidenceItem
 from orchestration.worker_packet import build_worker_packet_builder
 from orchestration.store import JsonOrchestrationStore
+from orchestration.worker_disposition import (
+    EngineeringDispositionError,
+    parse_engineering_disposition,
+)
+from orchestration.worker_result_bridge import (
+    GovernedDisposition,
+    UnresolvedWorkerResult,
+    WorkerResultBridge,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -111,7 +123,6 @@ engine = OrchestrationEngine(
 provider = OllamaProvider(
     model="nemotron-3-nano:4b",
     num_ctx=4096,
-    num_predict=512,
     num_gpu=0,
 )
 
@@ -292,9 +303,9 @@ PAGE = r"""<!doctype html>
 <div class="worker-card knobhead" data-worker="knobhead"><div class="avatar small"><img class="avatar-img" src="/static/cockpit/knobhead.png" alt=""></div><div><div class="worker-name">KNOBHEAD DAVE</div><div class="worker-desc">Adversarial verification. Challenges evidence and claims.</div></div><div class="state {% if current_worker == 'knobhead' and last_run %}active{% endif %}"><span class="dot"></span>{% if current_worker == 'knobhead' and last_run %}LATEST{% else %}IDLE{% endif %}</div><button class="worker-open" onclick="openWorker('knobhead','profile')">OPEN</button></div>
 <div class="worker-card steward" data-worker="steward"><div class="avatar small"><img class="avatar-img" src="/static/cockpit/steward.png" alt=""></div><div><div class="worker-name">STEWARD DAVE</div><div class="worker-desc">Continuity, provenance, lineage and supersession.</div></div><div class="state {% if current_worker == 'steward' and last_run %}active{% endif %}"><span class="dot"></span>{% if current_worker == 'steward' and last_run %}LATEST{% else %}IDLE{% endif %}</div><button class="worker-open" onclick="openWorker('steward','profile')">OPEN</button></div>
 </aside>
-<section class="activity"><div class="activity-title">CURRENT ACTIVITY</div><div class="node"><div class="n1">FOH DAVE</div><div class="n2">Persistent conversation</div></div><div class="patharrow">?</div>{% if last_run %}<div class="node"><div class="n1">{{ last_run.worker|upper }} DAVE</div><div class="n2">{{ last_run.validation }} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {{ last_run.provider }} / {{ last_run.model }}</div></div><div class="patharrow">?</div><div class="node pending"><div class="n1">NEXT?</div><div class="n2">Handoff decision pending</div></div>{% else %}<div class="node pending"><div class="n1">ROUTE?</div><div class="n2">FOH decides where work should begin</div></div>{% endif %}</section>
+<section class="activity"><div class="activity-title">CURRENT ACTIVITY</div><div class="node"><div class="n1">FOH DAVE</div><div class="n2">Persistent conversation</div></div><div class="patharrow">?</div>{% if last_run %}<div class="node"><div class="n1">{{ last_run.worker|upper }} DAVE</div><div class="n2">{{ last_run.validation }} ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {{ last_run.provider }} / {{ last_run.model }}</div></div><div class="patharrow">?</div><div class="node pending"><div class="n1">NEXT?</div><div class="n2">Handoff decision pending</div></div>{% else %}<div class="node pending"><div class="n1">ROUTE?</div><div class="n2">FOH decides where work should begin</div></div>{% endif %}</section>
 </main></div>
-<div class="modal" id="workerModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div class="avatar small" id="modalAvatar"><div class="avatar-fallback">D</div></div><div><div class="modal-title" id="modalTitle">WORKER</div><div class="sub" id="modalSub"></div></div><button class="close" onclick="closeWorker()">ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬</button></div><div class="tabs"><button class="tab active" data-tab="profile" onclick="showWorkerTab('profile')">PROFILE</button><button class="tab" data-tab="activity" onclick="showWorkerTab('activity')">ACTIVITY</button><button class="tab" data-tab="conversation" onclick="showWorkerTab('conversation')">TALK TO WORKER</button></div><div class="tabbody" id="workerBody"></div></div></div>
+<div class="modal" id="workerModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div class="avatar small" id="modalAvatar"><div class="avatar-fallback">D</div></div><div><div class="modal-title" id="modalTitle">WORKER</div><div class="sub" id="modalSub"></div></div><button class="close" onclick="closeWorker()">ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬</button></div><div class="tabs"><button class="tab active" data-tab="profile" onclick="showWorkerTab('profile')">PROFILE</button><button class="tab" data-tab="activity" onclick="showWorkerTab('activity')">ACTIVITY</button><button class="tab" data-tab="conversation" onclick="showWorkerTab('conversation')">TALK TO WORKER</button></div><div class="tabbody" id="workerBody"></div></div></div>
 <script>
 const workers={"engineering": {"title": "ENGINEERING DAVE", "role": "Engineering", "function": "Interprets system behaviour and technical facts. Performs bounded engineering work.", "boundary": "No promotion, sealing or human-authority substitution.", "provider": "Nemotron 3 Nano 4B for governed Engineering execution", "escalation": "May recommend Builder, Findings, Governance, Knobhead, Steward or Human Authority as relevant.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/engineering.png\" alt=\"\">"}, "findings": {"title": "FINDINGS DAVE", "role": "Findings", "function": "Extracts and structures observations, gaps and candidate findings.", "boundary": "Findings remain candidate until the required verification and authority path completes.", "provider": "Worker provider is separate from worker identity.", "escalation": "May recommend Engineering, Governance, Knobhead, Steward or Human Authority.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/findings.png\" alt=\"\">"}, "governance": {"title": "GOVERNANCE DAVE", "role": "Governance", "function": "Interprets approved contracts, rules and authority boundaries.", "boundary": "Cannot manufacture Human Authority.", "provider": "Worker provider is separate from worker identity.", "escalation": "May return to originating worker, require Knobhead challenge, or require Human Authority.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/governance.png\" alt=\"\">"}, "builder": {"title": "BUILDER DAVE", "role": "Builder", "function": "Implements bounded build work supplied under approved scope.", "boundary": "No unbounded edits, deployment, sealing or authority expansion.", "provider": "Worker provider is separate from worker identity.", "escalation": "Normally returns build result for Engineering and/or Knobhead verification.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/builder.png\" alt=\"\">"}, "knobhead": {"title": "KNOBHEAD DAVE", "role": "Adversarial Verification", "function": "Independently challenges evidence, claims and candidate acceptance.", "boundary": "Does not promote or build merely because another worker recommends it.", "provider": "Worker provider is separate from worker identity.", "escalation": "May PASS, HOLD, reject a claim, or require another bounded worker/human decision.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/knobhead.png\" alt=\"\">"}, "steward": {"title": "STEWARD DAVE", "role": "Steward", "function": "Maintains continuity, provenance, deduplication, lineage and supersession.", "boundary": "Records validated provenance. Does not manufacture validation.", "provider": "Worker provider is separate from worker identity.", "escalation": "Usually acts after validated provenance or when continuity structure needs review.", "avatar": "<img class=\"avatar-img\" src=\"/static/cockpit/steward.png\" alt=\"\">"}};let selectedWorker='engineering',selectedTab='profile',chatHistory=[],lastPhilMessage='';/* PMEI_ENGINEERING_HANDOFF_STATE_V2_2 */
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function tick(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}tick();setInterval(tick,1000);
@@ -1234,6 +1245,144 @@ def cockpit_worker(worker_name):
 # PMEI_OPENAI_CHAT_V2
 
 # PMEI_ENGINEERING_HANDOFF_V1
+@app.post("/orchestration/request-worker")
+def request_governed_start_worker():
+    payload = request.get_json(silent=True) or {}
+
+    task = str(payload.get("task") or "").strip()
+    requested_worker = str(
+        payload.get("requested_worker") or ""
+    ).strip().lower()
+
+    if not task:
+        return {
+            "ok": False,
+            "error": "task_required",
+            "transition_authority": False,
+        }, 400
+
+    if not requested_worker:
+        return {
+            "ok": False,
+            "error": "requested_worker_required",
+            "transition_authority": False,
+        }, 400
+
+    try:
+        get_worker(requested_worker)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "transition_authority": False,
+        }, 400
+
+    initial_workers = {
+        "architecture",
+        "engineering",
+        "governance",
+        "findings",
+        "steward",
+    }
+
+    if requested_worker not in initial_workers:
+        return {
+            "ok": False,
+            "error": "worker_requires_governed_transition",
+            "requested_worker": requested_worker,
+            "transition_authority": False,
+        }, 400
+
+    foh_context = _foh_pmei_prepare_for_question(task)
+
+    job = OrchestrationJob(
+        job_id="web-" + uuid.uuid4().hex[:12],
+        task=task,
+        requested_worker=requested_worker,
+        context={
+            "foh_context": foh_context,
+        },
+    )
+
+    engine.create_job(job)
+    execution = executor.execute(job.job_id)
+
+    execution_meta = execution.metadata or {}
+
+    # PMEI_GOVERNED_CAUSAL_CONTINUATION_V1
+    #
+    # WorkerExecution remains candidate inference only.
+    # Validator ACCEPT alone does not establish a causal result.
+    # A valid Engineering-owned disposition is required before
+    # the existing orchestration engine may consume WorkerResult.
+    if (
+        requested_worker == "engineering"
+        and execution.ok is True
+        and execution_meta.get("validation_status") == "ACCEPT"
+    ):
+        try:
+            engineering_disposition = parse_engineering_disposition(
+                execution.output_text
+            )
+
+            worker_result = WorkerResultBridge().from_execution(
+                execution,
+                GovernedDisposition(
+                    result_type="ENGINEERING_RESULT",
+                    status=engineering_disposition.status,
+                    responsible_layer="engineering",
+                    build_required=engineering_disposition.build_required,
+                ),
+            )
+
+            # Successor selection remains solely with the existing
+            # deterministic orchestration engine.
+            engine.submit_result(worker_result)
+
+        except (
+            EngineeringDispositionError,
+            UnresolvedWorkerResult,
+        ):
+            # Missing/invalid disposition preserves candidate-only
+            # behaviour. No causal WorkerResult is manufactured.
+            pass
+
+    return {
+        "ok": True,
+        "job_id": job.job_id,
+        "requested_worker": requested_worker,
+        "authority": "request_only",
+        "transition_authority": False,
+        "execution": {
+            "ok": execution.ok,
+            "provider": execution.provider,
+            "model": execution.model,
+            "validation": execution_meta.get("validation_status"),
+            "done_reason": execution_meta.get("done_reason"),
+            "num_predict": execution_meta.get("num_predict"),
+            "prompt_eval_count": execution_meta.get("prompt_eval_count"),
+            "eval_count": execution_meta.get("eval_count"),
+            "validation_issue_count": execution_meta.get(
+                "validation_issue_count",
+                0,
+            ),
+            "validation_issues": execution_meta.get(
+                "validation_issues",
+                [],
+            ),
+            "transition_authority": execution_meta.get(
+                "transition_authority",
+                False,
+            ),
+            "output": (
+                execution.output_text
+                or execution.error
+                or "(no output)"
+            ),
+        },
+    }, 202
+
+
 @app.post("/orchestration/request-engineering")
 def cockpit_request_engineering():
     payload = request.get_json(silent=True)
@@ -1855,6 +2004,77 @@ def local_chat_status():
 
 
 # PMEI_LOCAL_OLLAMA_CHAT_V1
+def _foh_request_initial_worker(task, requested_worker, selection):
+    """Reuse the frozen generic start view using the existing cockpit pattern.
+
+    No HTTP loopback call and no transition/result-submission path is introduced.
+    The task remains the original user message; the proposal cannot replace it.
+    """
+    endpoint = next((rule.endpoint for rule in app.url_map.iter_rules()
+        if rule.rule == "/orchestration/request-worker" and "POST" in rule.methods), None)
+    view = app.view_functions.get(endpoint) if endpoint else None
+    if view is None:
+        return {
+            "ok": False,
+            "error": "Existing governed worker-start route is unavailable. No job was started.",
+            "authority": "request_only", "transition_authority": False,
+        }, 503
+
+    add_live_event("HANDOFF", "FOH requested an initial worker",
+        requested_worker=requested_worker, authority="request_only", transition_authority=False)
+    try:
+        with app.test_request_context("/orchestration/request-worker", method="POST",
+            json={"task": task, "requested_worker": requested_worker}):
+            response = app.make_response(view())
+            body = response.get_json(silent=True)
+            status_code = response.status_code
+    except Exception as exc:
+        add_live_event("HANDOFF", "Initial worker request did not return a result",
+            requested_worker=requested_worker, error_type=type(exc).__name__)
+        return {
+            "ok": False,
+            "error": "The worker request did not return a result. Check job state before retrying.",
+            "initial_request": selection,
+            "authority": "request_only", "transition_authority": False,
+        }, 502
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "Invalid response from the governed start route.",
+            "authority": "request_only", "transition_authority": False}, 502
+    if status_code >= 400 or not body.get("ok"):
+        return {**body, "ok": False, "initial_request": selection}, status_code if status_code >= 400 else 502
+
+    execution = body.get("execution") or {}
+    if not isinstance(execution, dict) or not body.get("job_id") or body.get("requested_worker") != requested_worker:
+        return {"ok": False, "error": "Governed start returned an invalid worker result.",
+            "authority": "request_only", "transition_authority": False}, 502
+    accepted = execution.get("ok") is True and execution.get("validation") == "ACCEPT"
+    result = {
+        **body,
+        "ok": accepted,
+        "initial_request": selection,
+        "output_owner": requested_worker,
+        "result_status": "CANDIDATE_RETURNED" if accepted else "WORKER_RESULT_REJECTED",
+        "validation_status": execution.get("validation"),
+        "provider": execution.get("provider"),
+        "model": execution.get("model"),
+        "authority": "request_only",
+        "promotion_authority": False,
+        "verification_authority": False,
+        "transition_authority": False,
+    }
+    add_live_event("HANDOFF", "Initial worker returned candidate work" if accepted else "Initial worker result rejected",
+        job_id=body["job_id"], requested_worker=requested_worker,
+        validation=execution.get("validation"), authority="request_only", transition_authority=False)
+    if not accepted:
+        result["error"] = "The worker did not return an accepted candidate. The job has not advanced."
+        return result, 422
+    result["text"] = (
+        f"{get_worker(requested_worker).title} returned candidate work for review.\n\n"
+        + str(execution.get("output") or "")
+    )
+    return result, 200
+
+
 @app.post("/chat")
 def local_ollama_chat():
     """
@@ -1909,6 +2129,51 @@ def local_ollama_chat():
 
         except (json.JSONDecodeError, TypeError):
             history = []
+
+    # Bounded initial request proposal. The existing governed endpoint remains
+    # responsible for validating the requested role, creating and executing jobs.
+    # Worker results remain candidates; no WorkerResult is submitted here.
+    selection_started = time.perf_counter()
+    try:
+        proposal, selection_provider = propose_initial_request(
+            provider, message, history, model=FOH_OLLAMA_MODEL,
+        )
+    except InitialRequestError as exc:
+        return {
+            "ok": False,
+            "error": "FOH could not produce a valid initial request. No job was started.",
+            "error_code": str(exc),
+            "authority": "request_only",
+            "transition_authority": False,
+        }, 422
+    except Exception as exc:
+        add_live_event("CHAT", "FOH initial request failed", error_type=type(exc).__name__)
+        return {
+            "ok": False,
+            "error": "FOH initial request inference failed. No job was started.",
+            "authority": "request_only",
+            "transition_authority": False,
+        }, 502
+
+    selection = {
+        **proposal.as_dict(), **selection_provider,
+        "seconds": round(time.perf_counter() - selection_started, 4),
+        "authority": "request_only",
+        "transition_authority": False,
+    }
+    if proposal.action == "CLARIFY":
+        return {
+            "ok": True, "text": proposal.question,
+            "result_status": "CLARIFICATION_REQUIRED",
+            "initial_request": selection,
+            "authority": "conversation_only",
+            "pmei_context_used": False,
+            "promotion_authority": False,
+            "verification_authority": False,
+            "transition_authority": False,
+        }, 200
+    if proposal.action == "REQUEST_WORKER":
+        return _foh_request_initial_worker(message, proposal.requested_worker, selection)
 
     conversation_input = history + [{
         "role": "user",
@@ -2393,4 +2658,6 @@ if __name__ == "__main__":
         port=5000,
         debug=False,
     )
+
+
 
