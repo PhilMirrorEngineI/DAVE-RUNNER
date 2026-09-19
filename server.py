@@ -409,6 +409,28 @@ def historical_store_diagnostic_route():
             "coverage": "UNVERIFIED",
         }), 503
 
+@app.route("/memory/historical-stores/coverage", methods=["POST"])
+def historical_store_coverage_route():
+    """Authenticated aggregate-only historical coverage diagnostic."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    from orchestration.historical_store_coverage import (
+        inspect_historical_coverage,
+    )
+
+    try:
+        with get_db() as conn:
+            result = inspect_historical_coverage(conn, owner_user_id())
+        return jsonify({"ok": True, "data": result})
+    except Exception:
+        return jsonify({
+            "ok": False,
+            "error": "Historical store coverage unavailable",
+            "coverage": "UNVERIFIED",
+        }), 503
+
 @app.route("/health")
 @app.route("/healthz")
 def health():
