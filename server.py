@@ -385,6 +385,30 @@ def root():
     })
 
 
+@app.route("/memory/historical-stores/diagnostic", methods=["POST"])
+def historical_store_diagnostic_route():
+    """Authenticated, metadata-only historical store discovery."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    from orchestration.historical_store_diagnostic import (
+        discover_historical_stores,
+    )
+
+    try:
+        # Dedicated connection: never reuse or roll back another request's work.
+        with get_db() as conn:
+            result = discover_historical_stores(conn)
+        return jsonify({"ok": True, "data": result})
+    except Exception:
+        # Do not expose SQL errors, connection strings or database metadata.
+        return jsonify({
+            "ok": False,
+            "error": "Historical store diagnostic unavailable",
+            "coverage": "UNVERIFIED",
+        }), 503
+
 @app.route("/health")
 @app.route("/healthz")
 def health():
