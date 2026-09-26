@@ -9,10 +9,10 @@ $CandidateRoot = 'C:\Users\Philip Garry\Downloads\PMEi-human-gate-git'
 $ExpectedProductionHead = '2fce1177384cfe5fa799453d06183cb34d4e2c22'
 $ExpectedCandidateBranch = 'candidate/logic-v1-checklist-20260926'
 
-function GitValue([string]$Root, [string[]]$Args) {
-    $value = & git -C $Root @Args
+function GitValue([string]$Root, [string[]]$GitArgs) {
+    $value = & git -C $Root @GitArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "git failed in ${Root}: git $($Args -join ' ')"
+        throw "git failed in ${Root}: git $($GitArgs -join ' ')"
     }
     return ($value | Out-String).Trim()
 }
