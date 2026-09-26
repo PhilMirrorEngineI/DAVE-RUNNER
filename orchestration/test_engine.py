@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from orchestration.contracts import OrchestrationJob, WorkerResult
+from orchestration.contracts import HumanDecision, OrchestrationJob, WorkerResult
 from orchestration.engine import OrchestrationEngine
 from orchestration.store import JsonOrchestrationStore
 from orchestration.transitions import HUMAN_GATE
@@ -54,23 +54,6 @@ def test_accept_path():
             "accept-path"
         ).current_worker
         ==
-        "builder"
-    )
-
-    engine.submit_result(
-        WorkerResult(
-            job_id="accept-path",
-            worker_role="builder",
-            result_type="BUILD_CANDIDATE",
-            status="BUILD_CANDIDATE",
-        )
-    )
-
-    assert (
-        engine.get_state(
-            "accept-path"
-        ).current_worker
-        ==
         "knobhead"
     )
 
@@ -83,21 +66,29 @@ def test_accept_path():
         )
     )
 
-    state = engine.get_state(
-        "accept-path"
-    )
+    state = engine.get_state("accept-path")
+    assert state.status == "AWAITING_HUMAN"
+    assert state.current_worker == HUMAN_GATE
+    assert state.pending_human_target == "builder"
 
-    assert (
-        state.status
-        ==
-        "AWAITING_HUMAN"
+    state = engine.submit_human_decision(
+        HumanDecision(job_id="accept-path", decision="AUTHORIZE_BUILD")
     )
+    assert state.current_worker == "builder"
 
-    assert (
-        state.current_worker
-        ==
-        HUMAN_GATE
-    )
+    engine.submit_result(WorkerResult(
+        job_id="accept-path", worker_role="builder",
+        result_type="BUILD_CANDIDATE", status="BUILD_CANDIDATE",
+    ))
+    assert engine.get_state("accept-path").current_worker == "knobhead"
+
+    engine.submit_result(WorkerResult(
+        job_id="accept-path", worker_role="knobhead",
+        result_type="VERIFICATION_VERDICT", status="ACCEPT",
+    ))
+    state = engine.get_state("accept-path")
+    assert state.current_worker == HUMAN_GATE
+    assert state.pending_human_target is None
 
 
 def test_revise_to_engineering():
@@ -118,15 +109,6 @@ def test_revise_to_engineering():
             result_type="ENGINEERING_REQUIREMENT",
             status="READY_FOR_BUILD",
             build_required=True,
-        )
-    )
-
-    engine.submit_result(
-        WorkerResult(
-            job_id="revise-path",
-            worker_role="builder",
-            result_type="BUILD_CANDIDATE",
-            status="BUILD_CANDIDATE",
         )
     )
 
@@ -280,7 +262,7 @@ def test_persistence_recovery():
     assert (
         state.current_worker
         ==
-        "builder"
+        "knobhead"
     )
 
     assert (
@@ -304,7 +286,7 @@ def test_persistence_recovery():
             0
         ].next_worker
         ==
-        "builder"
+        "knobhead"
     )
 
 

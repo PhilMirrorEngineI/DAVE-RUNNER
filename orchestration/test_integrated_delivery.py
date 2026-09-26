@@ -47,7 +47,7 @@ def test_no_successful_answer_for_rejected_or_truncated_candidates():
 def test_real_chain_delivers_builder_candidate_and_review_through_read_only_status(wire, monkeypatch):
     chain(wire)
     report = drive(wire)
-    assert report["delivery"]["answer_owner"] == "builder"
+    assert report["delivery"]["answer_owner"] == "engineering"
     assert report["delivery"]["human_approved"] is False
     assert report["result_status"] == "AWAITING_HUMAN"
     monkeypatch.setattr(webapp, "engine", wire.engine)

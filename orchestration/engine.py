@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .contracts import OrchestrationJob, WorkerResult
+from .contracts import HumanDecision, OrchestrationJob, WorkerResult
 from .store import (
     JsonOrchestrationStore,
     OrchestrationRecordNotFound,
@@ -29,6 +29,8 @@ class OrchestrationState:
     history: List[WorkerResult] = field(
         default_factory=list
     )
+    human_decisions: List[HumanDecision] = field(default_factory=list)
+    pending_human_target: Optional[str] = None
 
 
 class OrchestrationEngine:
@@ -131,6 +133,12 @@ class OrchestrationEngine:
                 for result
                 in state.history
             ],
+            "human_decisions": [
+                asdict(decision)
+                for decision
+                in state.human_decisions
+            ],
+            "pending_human_target": state.pending_human_target,
         }
 
     def _job_from_payload(
@@ -353,6 +361,22 @@ class OrchestrationEngine:
                 )
             )
 
+        decisions_payload = payload.get("human_decisions")
+        if not isinstance(decisions_payload, list):
+            decisions_payload = []
+
+        human_decisions: List[HumanDecision] = []
+        for item in decisions_payload:
+            if not isinstance(item, dict):
+                continue
+            human_decisions.append(
+                HumanDecision(
+                    job_id=str(item.get("job_id") or ""),
+                    decision=str(item.get("decision") or ""),
+                    note=str(item.get("note") or ""),
+                )
+            )
+
         return OrchestrationState(
             job=job,
 
@@ -371,6 +395,8 @@ class OrchestrationEngine:
             ),
 
             history=history,
+            human_decisions=human_decisions,
+            pending_human_target=payload.get("pending_human_target"),
         )
 
     # -------------------------------------------------------------------------
@@ -490,6 +516,12 @@ class OrchestrationEngine:
             get_worker(
                 current_worker
             )
+
+            if current_worker == "builder":
+                raise ValueError(
+                    "Builder cannot be an initial worker; explicit human "
+                    "authorisation of a reviewed build proposal is required."
+                )
 
         state = OrchestrationState(
             job=job,
@@ -652,6 +684,29 @@ class OrchestrationEngine:
                 "AWAITING_HUMAN"
             )
 
+            # Only a pre-build Knobhead ACCEPT can establish a pending
+            # Builder target. The engine derives that target from recorded
+            # reviewed work; the human decision cannot invent a successor.
+            state.pending_human_target = None
+            if (
+                result.worker_role == "knobhead"
+                and result.status.upper().strip() == "ACCEPT"
+            ):
+                latest_engineering = -1
+                latest_builder = -1
+                for index, prior in enumerate(state.history):
+                    if (
+                        prior.worker_role == "engineering"
+                        and prior.status.upper().strip() == "READY_FOR_BUILD"
+                        and prior.build_required is True
+                    ):
+                        latest_engineering = index
+                    if prior.worker_role == "builder":
+                        latest_builder = index
+
+                if latest_engineering > latest_builder:
+                    state.pending_human_target = "builder"
+
             self.persist_state(
                 state
             )
@@ -680,4 +735,49 @@ class OrchestrationEngine:
             state
         )
 
+        return state
+
+    def submit_human_decision(
+        self,
+        decision: HumanDecision,
+    ) -> OrchestrationState:
+        """Apply an explicit human decision at HUMAN_GATE."""
+        state = self.get_state(decision.job_id)
+
+        if state.current_worker != HUMAN_GATE or state.status != "AWAITING_HUMAN":
+            raise ValueError("Job is not awaiting a human decision.")
+
+        action = str(decision.decision or "").upper().strip()
+        note = str(decision.note or "").strip()
+        if action not in {"AUTHORIZE_BUILD", "REJECT_BUILD", "AMEND_BUILD", "CLOSE"}:
+            raise ValueError("Unsupported human decision.")
+
+        if action != "CLOSE" and state.pending_human_target != "builder":
+            raise ValueError("No reviewed build proposal is awaiting authority.")
+
+        if action == "AMEND_BUILD" and not note:
+            raise ValueError("AMEND_BUILD requires a human amendment note.")
+        state.human_decisions.append(
+            HumanDecision(
+                job_id=decision.job_id,
+                decision=action,
+                note=note,
+            )
+        )
+
+        if action == "AUTHORIZE_BUILD":
+            state.current_worker = "builder"
+            state.status = "READY"
+        elif action == "AMEND_BUILD":
+            state.current_worker = "engineering"
+            state.status = "READY"
+        elif action == "REJECT_BUILD":
+            state.current_worker = None
+            state.status = "HUMAN_REJECTED"
+        else:
+            state.current_worker = None
+            state.status = "HUMAN_CLOSED"
+
+        state.pending_human_target = None
+        self.persist_state(state)
         return state

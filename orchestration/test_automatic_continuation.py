@@ -22,8 +22,12 @@ def outcome(status, basis, layer=None):
 
 
 def chain(wire, review='ACCEPT_CANDIDATE'):
-    wire.replies.extend([WORK, reply(SCOPE), BUILD, outcome('BUILD_CANDIDATE', 'def column_count(header):'),
-        REVIEW, outcome(review, 'Candidate review', 'engineering' if review == 'REVISE_CANDIDATE' else None)])
+    wire.replies.extend([
+        WORK,
+        reply(SCOPE),
+        REVIEW,
+        outcome(review, 'Candidate review', 'engineering' if review == 'REVISE_CANDIDATE' else None),
+    ])
 
 
 def drive(wire, **limits):
@@ -38,18 +42,17 @@ def test_full_chain_uses_recorded_candidates_and_stops_before_human(wire):
     report = drive(wire)
     assert report['result_status'] == 'AWAITING_HUMAN'
     state = wire.engine.get_state('bounded')
-    assert [r.worker_role for r in state.history] == ['engineering', 'builder', 'knobhead']
-    assert [r.next_worker for r in state.history] == ['builder', 'knobhead', 'human_gate']
-    assert len(wire.calls) == 6 and not wire.replies
+    assert [r.worker_role for r in state.history] == ['engineering', 'knobhead']
+    assert [r.next_worker for r in state.history] == ['knobhead', 'human_gate']
+    assert len(wire.calls) == 4 and not wire.replies
     assert WORK_TEXT in wire.calls[2]['messages'][-1]['content']
-    # Recorded multiline work is JSON escaped by the installed handoff renderer.
-    assert json.dumps(BUILD, ensure_ascii=False)[1:-1] in wire.calls[4]['messages'][-1]['content']
-    for i in (3, 5):
+    assert WORK_TEXT in wire.calls[2]['messages'][-1]['content']
+    for i in (3,):
         assert wire.calls[i]['format']['additionalProperties'] is False
         assert set(wire.calls[i]['format']['required']) == {'status', 'responsible_layer', 'basis'}
-    assert report['history_count'] == 3 and report['causal_continuation']['successor_executed'] is True
+    assert report['history_count'] == 2 and report['causal_continuation']['successor_executed'] is True
     assert all(report[key] is False for key in ('transition_authority', 'promotion_authority', 'verification_authority'))
-    assert WORK_TEXT in report['text'] and BUILD in report['text'] and REVIEW in report['text']
+    assert WORK_TEXT in report['text'] and REVIEW in report['text']
     assert 'no human approval' in report['text']
 
 
@@ -75,8 +78,8 @@ def test_chat_queues_once_and_status_is_observation_only(wire, monkeypatch):
     assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime and len(wire.calls) == 1
     callback = pending.pop(); callback(); callback()  # Replayed scheduler callback cannot execute twice.
     report = client.get(body['status_url']).get_json()
-    assert report['result_status'] == 'AWAITING_HUMAN' and report['history_count'] == 3
-    assert len(wire.calls) == 7
+    assert report['result_status'] == 'AWAITING_HUMAN' and report['history_count'] == 2
+    assert len(wire.calls) == 5
     assert client.get('/orchestration/jobs/unknown-job').status_code == 404
     assert client.get('/orchestration/jobs/a.bad').status_code == 400
 
@@ -112,10 +115,10 @@ def test_advisory_no_build_reaches_gate_without_builder(wire):
 
 
 def test_invalid_outcome_never_falls_back_to_build_prose(wire):
-    wire.replies.extend([WORK,reply(SCOPE),BUILD,'BUILD_CANDIDATE'])
+    wire.replies.extend([WORK,reply(SCOPE),REVIEW,'ACCEPT_CANDIDATE'])
     report=drive(wire)
     assert report['result_status']=='CANDIDATE_ONLY'
-    assert report['current_worker']=='builder' and report['history_count']==1
+    assert report['current_worker']=='knobhead' and report['history_count']==1
     assert len(wire.calls)==4
 
 
@@ -123,21 +126,21 @@ def test_revision_bound_preserves_second_review_but_does_not_run_again(wire):
     chain(wire,'REVISE_CANDIDATE');chain(wire,'REVISE_CANDIDATE')
     report=drive(wire)
     assert report['result_status']=='REVISION_LIMIT'
-    assert report['history_count']==6 and len(wire.calls)==12
+    assert report['history_count']==4 and len(wire.calls)==8
     assert report['current_worker']=='engineering'
-    assert REVIEW in wire.calls[6]['messages'][-1]['content']
+    assert WORK_TEXT in wire.calls[6]['messages'][-1]['content']
 
 
 def test_one_revision_can_reach_human_gate(wire):
     chain(wire,'REVISE_CANDIDATE');chain(wire)
     assert drive(wire)['result_status']=='AWAITING_HUMAN'
-    assert len(wire.calls)==12
+    assert len(wire.calls)==8
 
 
 def test_step_limit_stops_at_recorded_successor(wire):
     chain(wire)
     report=drive(wire,max_steps=1)
-    assert report['result_status']=='STEP_LIMIT' and report['current_worker']=='builder'
+    assert report['result_status']=='STEP_LIMIT' and report['current_worker']=='knobhead'
     assert report['history_count']==1 and len(wire.calls)==2
 
 

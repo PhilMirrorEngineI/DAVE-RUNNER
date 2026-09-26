@@ -76,7 +76,7 @@ def run_request(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("disposition,worker,status", [
-    (READY, "builder", "READY"), (NO_BUILD, "human_gate", "AWAITING_HUMAN"),
+    (READY, "knobhead", "READY"), (NO_BUILD, "human_gate", "AWAITING_HUMAN"),
 ])
 def test_metadata_reaches_existing_engine_without_prose(run_request, disposition, worker, status):
     body, state, captured = run_request(disposition)

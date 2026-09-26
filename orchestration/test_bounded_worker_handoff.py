@@ -85,7 +85,7 @@ def test_engineering_scope_and_candidate_reach_builder_with_pmei_packet(wire):
     scope_schema=disposition_call["format"]["properties"]["build_requirement"]["anyOf"][1]
     assert scope_schema["additionalProperties"] is False
     assert set(scope_schema["required"])==set(SCOPE)
-    wire.replies.append(BUILD)
+    wire.replies.append("UNVERIFIED: Candidate review requires human authority before build.")
     execution=wire.executor.execute("bounded")
     assert execution.ok
     text=wire.calls[-1]["messages"][-1]["content"]
@@ -94,27 +94,21 @@ def test_engineering_scope_and_candidate_reach_builder_with_pmei_packet(wire):
     assert "FORGED_JOB_CONTEXT" not in text
     assert "UNVERIFIED CANDIDATE INPUT" in text
     state=wire.engine.get_state("bounded")
-    assert len(state.history)==1 and state.current_worker=="builder"
+    assert len(state.history)==1 and state.current_worker=="knobhead"
     assert execution.metadata["transition_authority"] is False
     # The provider remains separate from the recorded active role.
-    assert "builder" in text
+    assert "knobhead" in text
 
 
-def test_knobhead_receives_build_candidate_and_original_requirement(wire):
+def test_knobhead_receives_engineering_candidate_and_original_requirement(wire):
     submit_engineering(wire)
-    wire.replies.append(BUILD)
-    execution=wire.executor.execute("bounded")
-    candidate=WorkerResultBridge().from_execution(execution,GovernedDisposition(
-        result_type="BUILD_CANDIDATE",status="BUILD_CANDIDATE"))
-    wire.engine.submit_result(candidate)
-    wire.replies.append("UNVERIFIED: candidate requires independent testing.")
+    wire.replies.append("UNVERIFIED: Candidate review requires human authority before build.")
     result=wire.executor.execute("bounded")
     assert result.ok
     text=wire.calls[-1]["messages"][-1]["content"]
-    assert "column_count" in text and WORK_TEXT in text and SCOPE["acceptance_criteria"][0] in text
+    assert WORK_TEXT in text and SCOPE["acceptance_criteria"][0] in text
     assert wire.engine.get_state("bounded").current_worker=="knobhead"
-    assert len(wire.engine.get_state("bounded").history)==2
-
+    assert len(wire.engine.get_state("bounded").history)==1
 
 def test_restored_job_retains_scope_for_builder(wire):
     submit_engineering(wire)
@@ -137,7 +131,7 @@ def test_bare_build_boolean_cannot_enter_bridge():
     lambda r:r.output.update(candidate_output="x"*16001),
     lambda r:r.output["build_requirement"].update(request_basis="invented user request"),
     lambda r:setattr(r,"job_id","another-job"),
-    lambda r:setattr(r,"next_worker","knobhead"),
+    lambda r:setattr(r,"next_worker","builder"),
 ])
 def test_invalid_recorded_handoff_blocks_before_retrieval_and_inference(wire,monkeypatch,corrupt):
     result=submit_engineering(wire)
@@ -185,17 +179,12 @@ def test_provider_handoff_cannot_change_recipient(wire):
 
 def test_knobhead_cannot_consume_requirement_from_another_job(wire):
     engineering=submit_engineering(wire)
-    wire.replies.append(BUILD)
-    execution=wire.executor.execute("bounded")
-    wire.engine.submit_result(WorkerResultBridge().from_execution(execution,GovernedDisposition(
-        result_type="BUILD_CANDIDATE",status="BUILD_CANDIDATE")))
     engineering.job_id="another-job"
     before=len(wire.calls)
     result=wire.executor.execute("bounded")
     assert result.ok is False and result.metadata["handoff_status"]=="BLOCKED"
     assert len(wire.calls)==before
-    assert len(wire.engine.get_state("bounded").history)==2
-
+    assert len(wire.engine.get_state("bounded").history)==1
 
 def test_valid_no_build_result_cannot_inherit_provider_supplied_build_scope(wire,monkeypatch):
     from orchestration.providers import ProviderResponse

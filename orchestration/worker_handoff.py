@@ -25,6 +25,18 @@ def candidate_text(result):
     return value
 
 
+def _latest_engineering_requirement(history, job_id):
+    for result in reversed(history):
+        if (
+            result.job_id == job_id
+            and result.worker_role == "engineering"
+            and result.status == "READY_FOR_BUILD"
+            and result.build_required is True
+        ):
+            return result
+    return None
+
+
 def prepare_worker_handoff(state):
     worker = state.current_worker
     history = state.history
@@ -32,9 +44,11 @@ def prepare_worker_handoff(state):
         if worker in {"builder", "knobhead"}:
             raise WorkerHandoffError("Active successor has no recorded upstream work.")
         return None
+
     previous = history[-1]
-    if previous.job_id != state.job.job_id or previous.next_worker != worker:
-        raise WorkerHandoffError("Recorded handoff does not match the active job and worker.")
+    if previous.job_id != state.job.job_id:
+        raise WorkerHandoffError("Recorded handoff does not match the active job.")
+
     handoff = {
         "job_id": state.job.job_id,
         "to_worker": worker,
@@ -45,23 +59,40 @@ def prepare_worker_handoff(state):
         "engineering_candidate": None,
     }
     requirement_result = None
+
     if worker == "builder":
-        if previous.worker_role != "engineering" or previous.status != "READY_FOR_BUILD" or previous.build_required is not True:
-            raise WorkerHandoffError("Builder requires a recorded Engineering build disposition.")
-        requirement_result = previous
-    elif worker == "knobhead":
-        if previous.worker_role != "builder" or previous.status != "BUILD_CANDIDATE":
-            raise WorkerHandoffError("Knobhead requires a recorded Builder candidate.")
-        if len(history) < 2:
-            raise WorkerHandoffError("Builder candidate has no preceding Engineering requirement.")
-        requirement_result = history[-2]
-        if (requirement_result.job_id != state.job.job_id
-                or requirement_result.worker_role != "engineering"
-                or requirement_result.status != "READY_FOR_BUILD"
-                or requirement_result.build_required is not True
-                or requirement_result.next_worker != "builder"):
-            raise WorkerHandoffError("Builder candidate is not bound to its Engineering requirement.")
+        if previous.worker_role != "knobhead" or previous.status != "ACCEPT":
+            raise WorkerHandoffError("Builder requires an accepted adversarial review.")
+        decisions = getattr(state, "human_decisions", [])
+        if not decisions or decisions[-1].decision != "AUTHORIZE_BUILD":
+            raise WorkerHandoffError("Builder requires explicit human authorisation.")
+        requirement_result = _latest_engineering_requirement(history, state.job.job_id)
+        if requirement_result is None or requirement_result.next_worker != "knobhead":
+            raise WorkerHandoffError("Authorised Builder work has no reviewed Engineering requirement.")
         handoff["engineering_candidate"] = candidate_text(requirement_result)
+
+    elif worker == "knobhead":
+        if previous.next_worker != "knobhead":
+            raise WorkerHandoffError("Recorded handoff does not target Knobhead.")
+        if previous.worker_role == "engineering":
+            if previous.status != "READY_FOR_BUILD" or previous.build_required is not True:
+                raise WorkerHandoffError("Knobhead pre-build review requires a build proposal.")
+            requirement_result = previous
+            handoff["engineering_candidate"] = candidate_text(previous)
+        elif previous.worker_role == "builder":
+            if previous.status != "BUILD_CANDIDATE":
+                raise WorkerHandoffError("Knobhead post-build review requires a Builder candidate.")
+            requirement_result = _latest_engineering_requirement(history, state.job.job_id)
+            if requirement_result is None or requirement_result.next_worker != "knobhead":
+                raise WorkerHandoffError("Builder candidate is not bound to its reviewed Engineering requirement.")
+            handoff["engineering_candidate"] = candidate_text(requirement_result)
+        else:
+            raise WorkerHandoffError("Knobhead requires Engineering or Builder candidate work.")
+
+    else:
+        if previous.next_worker != worker:
+            raise WorkerHandoffError("Recorded handoff does not match the active job and worker.")
+
     if requirement_result is not None:
         try:
             handoff["build_requirement"] = validate_build_requirement(

@@ -116,8 +116,8 @@ build_required: true
     state = engine.submit_result(result)
 
     # Existing PMEi transition law owns this decision.
-    assert result.next_worker == "builder"
-    assert state.current_worker == "builder"
+    assert result.next_worker == "knobhead"
+    assert state.current_worker == "knobhead"
 
 
 def test_no_build_required_reaches_human_gate_only_through_engine():

@@ -12,6 +12,13 @@ class OrchestrationJob:
     constraints: List[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class HumanDecision:
+    job_id: str
+    decision: str
+    note: str = ""
+
+
 @dataclass
 class WorkerResult:
     job_id: str

@@ -65,24 +65,11 @@ def test_knobhead_cannot_manufacture_human_gate():
         )
     )
 
-    engine.submit_result(
-        WorkerResult(
-            job_id=job_id,
-            worker_role="builder",
-            result_type="BUILD_CANDIDATE",
-            status="BUILD_CANDIDATE",
-            output={
-                "candidate_output": "INFERENCE: candidate code, not executed or verified.",
-                "validation_status": "ACCEPT",
-            },
-        )
-    )
-
     before = engine.get_state(job_id)
 
     assert before.status == "READY"
     assert before.current_worker == "knobhead"
-    assert len(before.history) == 2
+    assert len(before.history) == 1
 
     executor = WorkerExecutor(
         engine,
@@ -107,7 +94,7 @@ def test_knobhead_cannot_manufacture_human_gate():
 
     assert after.status == "READY"
     assert after.current_worker == "knobhead"
-    assert len(after.history) == 2
+    assert len(after.history) == 1
 
 
 

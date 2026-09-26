@@ -122,15 +122,15 @@ def test_snapshot_and_restored_successor_keep_constraints_separate_from_evidence
     assert bound["constraints"] == ["Never replace the original dataset."]
     submit_engineering(wire)
     wire.executor.engine = OrchestrationEngine(wire.engine.store, restore_existing=True)
-    wire.replies.append(BUILD)
+    wire.replies.append("UNVERIFIED: Candidate review only.")
     result = wire.executor.execute("bounded")
     assert result.ok
     text = wire.calls[-1]["messages"][-1]["content"]
     assert "RECORDED WORKER HANDOFF" in text
-    assert requirements_from_message(text)["worker_role"] == "builder"
+    assert requirements_from_message(text)["worker_role"] == "knobhead"
     assert requirements_from_message(text)["constraints"] == state.job.constraints
     restored = wire.executor.engine.get_state("bounded")
-    assert restored.current_worker == "builder" and len(restored.history) == 1
+    assert restored.current_worker == "knobhead" and len(restored.history) == 1
 
 
 @pytest.mark.parametrize("constraints", [None, "a string", {}, [""], [" \n"], [1],

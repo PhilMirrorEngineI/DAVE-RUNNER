@@ -200,7 +200,7 @@ build_required: true
     assert result.next_worker is None
 
     # Existing deterministic PMEi transition law does.
-    assert next_worker_from_result(result) == "builder"
+    assert next_worker_from_result(result) == "knobhead"
 
 
 def test_no_build_uses_existing_transition_law():

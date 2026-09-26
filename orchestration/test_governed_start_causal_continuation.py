@@ -135,10 +135,10 @@ build_required: true
     assert submitted.worker_role == "engineering"
     assert submitted.status == "READY_FOR_BUILD"
     assert submitted.build_required is True
-    assert submitted.next_worker == "builder"
+    assert submitted.next_worker == "knobhead"
 
     # Existing transition law, not provider/route, selected Builder.
-    assert state.current_worker == "builder"
+    assert state.current_worker == "knobhead"
 
 
 def test_valid_no_build_required_advances_to_human_gate(

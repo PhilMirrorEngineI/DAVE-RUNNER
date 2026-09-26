@@ -31,7 +31,9 @@ def next_worker_from_result(
             status == "READY_FOR_BUILD"
             and result.build_required is True
         ):
-            return "builder"
+            # A build proposal must be independently challenged before
+            # any human authority can make Builder eligible.
+            return "knobhead"
 
         if status in {
             "NO_BUILD_REQUIRED",

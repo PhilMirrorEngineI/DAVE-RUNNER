@@ -23,6 +23,7 @@ from .worker_result_bridge import UnresolvedWorkerResult, WorkerResultBridge
 
 
 JOURNAL = "_automatic_continuation_v1"
+JOURNAL_HISTORY = "_automatic_continuation_history_v1"
 MAX_STEPS = 8
 MAX_REVISIONS = 1
 MAX_SECONDS = 1200  # Checked between operations; does not interrupt an in-flight provider.
@@ -170,6 +171,102 @@ class AutomaticContinuation:
             "run_id": run_id, "phase": "QUEUED", "created_at": _now(), "steps": [],
             "stop_reason": None, "max_steps": self.max_steps,
             "max_revisions": self.max_revisions, "max_seconds": self.max_seconds,
+        }
+        self._persist(job_id, record)
+        with _LOCK:
+            _ACTIVE.add(run_id)
+        queued = read_report(self.engine, job_id)
+        try:
+            (launch or launch_background)(lambda: self._drive(job_id, record))
+        except Exception as exc:
+            self._stop(job_id, record, "START_FAILED", type(exc).__name__)
+            with _LOCK:
+                _ACTIVE.discard(run_id)
+            return read_report(self.engine, job_id)
+        return queued
+
+    def resume_after_human_decision(self, job_id, *, launch=None):
+        """Start one new bounded attempt after an explicit persisted human decision."""
+        state = self.engine.get_state(job_id)
+        if state.status != "READY" or state.current_worker not in {"builder", "engineering"}:
+            return {
+                "ok": False,
+                "job_id": job_id,
+                "result_status": "HUMAN_RESUME_NOT_ELIGIBLE",
+                "authority": "human_decision_required",
+                "transition_authority": False,
+            }
+
+        decisions = getattr(state, "human_decisions", [])
+        if not decisions or decisions[-1].decision not in {"AUTHORIZE_BUILD", "AMEND_BUILD"}:
+            return {
+                "ok": False,
+                "job_id": job_id,
+                "result_status": "HUMAN_RESUME_NOT_AUTHORISED",
+                "authority": "human_decision_required",
+                "transition_authority": False,
+            }
+
+        prior = state.job.context.get(JOURNAL)
+        if (
+            type(prior) is not dict
+            or prior.get("phase") != "STOPPED"
+            or prior.get("stop_reason") != "AWAITING_HUMAN"
+        ):
+            return {
+                "ok": False,
+                "job_id": job_id,
+                "result_status": "HUMAN_RESUME_NO_GATE_RECORD",
+                "authority": "human_decision_required",
+                "transition_authority": False,
+            }
+
+        decision_number = len(decisions)
+        claims = self.engine.store.root / ".automatic_claims"
+        claims.mkdir(exist_ok=True)
+        base = self.engine.store.path_for(job_id).name
+        claim = claims / f"{base}.human-{decision_number}"
+        run_id = uuid.uuid4().hex
+        try:
+            fd = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return {
+                "ok": False,
+                "job_id": job_id,
+                "result_status": "HUMAN_RESUME_ALREADY_CLAIMED",
+                "authority": "human_explicit",
+                "transition_authority": False,
+            }
+
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(run_id)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        journal_history = state.job.context.get(JOURNAL_HISTORY)
+        if type(journal_history) is not list:
+            journal_history = []
+        journal_history.append(deepcopy(prior))
+        state.job.context[JOURNAL_HISTORY] = journal_history
+        state.job.context.pop(JOURNAL, None)
+        self.engine.persist_state(state)
+
+        signature = _signature(state)
+        if _signature(_read_state(self.engine, job_id)) != signature:
+            raise StateChangedError("Persisted job differs from the human-approved state.")
+        self._signatures[job_id] = signature
+
+        record = {
+            "run_id": run_id,
+            "phase": "QUEUED",
+            "created_at": _now(),
+            "steps": [],
+            "stop_reason": None,
+            "max_steps": self.max_steps,
+            "max_revisions": self.max_revisions,
+            "max_seconds": self.max_seconds,
+            "resumed_from_run_id": prior.get("run_id"),
+            "human_decision": decisions[-1].decision,
         }
         self._persist(job_id, record)
         with _LOCK:

@@ -1387,6 +1387,71 @@ def request_governed_start_worker():
     return report, 202 if report.get("ok") else 503
 
 
+@app.post("/orchestration/jobs/<job_id>/human-decision")
+def orchestration_human_decision(job_id):
+    import re
+    from orchestration.automatic_continuation import AutomaticContinuation
+    from orchestration.contracts import HumanDecision
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", job_id):
+        return {"ok": False, "error": "invalid_job_id", "transition_authority": False}, 400
+
+    payload = request.get_json(silent=True) or {}
+    decision = str(payload.get("decision") or "").upper().strip()
+    note = str(payload.get("note") or "").strip()
+
+    try:
+        state = engine.submit_human_decision(
+            HumanDecision(job_id=job_id, decision=decision, note=note)
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "job_id": job_id,
+            "error": str(exc),
+            "human_decision_recorded": False,
+            "transition_authority": False,
+            "promotion_authority": False,
+            "verification_authority": False,
+        }, 409
+
+    if state.status == "READY":
+        try:
+            report = AutomaticContinuation(
+                engine,
+                executor,
+            ).resume_after_human_decision(job_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "job_id": job_id,
+                "error": "Human decision was recorded but continuation did not start.",
+                "error_type": type(exc).__name__,
+                "human_decision_recorded": True,
+                "human_decision": decision,
+                "status_url": "/orchestration/jobs/" + job_id,
+                "transition_authority": False,
+            }, 503
+        report["human_decision_recorded"] = True
+        report["human_decision"] = decision
+        report["status_url"] = "/orchestration/jobs/" + job_id
+        return report, 202 if report.get("ok") else 409
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "result_status": state.status,
+        "current_worker": state.current_worker,
+        "human_decision_recorded": True,
+        "human_decision": decision,
+        "human_approved": False,
+        "transition_authority": False,
+        "promotion_authority": False,
+        "verification_authority": False,
+        "status_url": "/orchestration/jobs/" + job_id,
+    }, 200
+
+
 @app.get("/orchestration/jobs/<job_id>")
 def orchestration_job_status(job_id):
     import re
