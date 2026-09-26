@@ -8,6 +8,8 @@ It does not retrieve evidence, classify relationship intent, infer answers,
 mutate state, or grant authority.
 """
 
+CONTRACT = "shared_source_capabilities_v1"
+
 PMEI_LOOKUP = "PMEI_LOOKUP"
 WEB_LOOKUP = "WEB_LOOKUP"
 

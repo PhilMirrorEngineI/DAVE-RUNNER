@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+
+HUMAN_DECISION_CONTRACT = "human_gate_decision_v1"
 from typing import Any, Dict, List, Optional
 
 

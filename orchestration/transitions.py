@@ -4,6 +4,8 @@ from .contracts import WorkerResult
 from .workers import WORKERS
 
 
+CONTRACT = "worker_transition_law_v1"
+
 HUMAN_GATE = "human_gate"
 
 

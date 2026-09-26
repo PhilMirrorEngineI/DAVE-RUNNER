@@ -4,6 +4,11 @@ No worker is selected or executed here. History is read from the engine, never
 from user job.context or provider metadata. Prior work remains unverified.
 """
 import json
+from .authorized_builder_packet import (
+    AuthorizedBuilderPacketError,
+    build_authorized_builder_packet,
+    validate_authorized_builder_packet,
+)
 from .build_requirement import BuildRequirementError, validate_build_requirement
 
 
@@ -57,6 +62,7 @@ def prepare_worker_handoff(state):
         "candidate_output": candidate_text(previous),
         "build_requirement": None,
         "engineering_candidate": None,
+        "authorized_builder_packet": None,
     }
     requirement_result = None
 
@@ -70,6 +76,16 @@ def prepare_worker_handoff(state):
         if requirement_result is None or requirement_result.next_worker != "knobhead":
             raise WorkerHandoffError("Authorised Builder work has no reviewed Engineering requirement.")
         handoff["engineering_candidate"] = candidate_text(requirement_result)
+        try:
+            handoff["authorized_builder_packet"] = build_authorized_builder_packet(
+                job_id=state.job.job_id,
+                task=state.job.task,
+                build_requirement=requirement_result.output.get("build_requirement"),
+                human_decision=decisions[-1],
+                decision_index=len(decisions),
+            )
+        except (BuildRequirementError, AuthorizedBuilderPacketError) as exc:
+            raise WorkerHandoffError(str(exc)) from exc
 
     elif worker == "knobhead":
         if previous.next_worker != "knobhead":
@@ -105,7 +121,7 @@ def prepare_worker_handoff(state):
 
 def render_worker_handoff(handoff, *, expected_worker):
     fields = {"job_id", "to_worker", "from_worker", "source_status", "candidate_output",
-              "build_requirement", "engineering_candidate"}
+              "build_requirement", "engineering_candidate", "authorized_builder_packet"}
     if type(handoff) is not dict or set(handoff) != fields:
         raise WorkerHandoffError("Invalid recorded handoff fields.")
     if handoff["to_worker"] != expected_worker:
@@ -123,6 +139,17 @@ def render_worker_handoff(handoff, *, expected_worker):
             validate_build_requirement(handoff["build_requirement"])
         except BuildRequirementError as exc:
             raise WorkerHandoffError(str(exc)) from exc
+
+    packet = handoff["authorized_builder_packet"]
+    if expected_worker == "builder":
+        try:
+            validate_authorized_builder_packet(packet)
+        except AuthorizedBuilderPacketError as exc:
+            raise WorkerHandoffError(str(exc)) from exc
+    elif packet is not None:
+        raise WorkerHandoffError(
+            "Only an explicitly authorised Builder may receive the Builder packet."
+        )
     text = json.dumps(handoff, ensure_ascii=False, indent=2)
     if len(text) > MAX_HANDOFF_CHARS:
         raise WorkerHandoffError("Recorded work exceeds the handoff bound.")

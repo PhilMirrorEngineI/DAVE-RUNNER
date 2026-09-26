@@ -1041,6 +1041,12 @@ class PMEiWorkerPacketBuilder:
 
         lines.extend([
             f"TASK: {packet.task}",
+            "",
+            "USER-SUPPLIED CONTEXT BOUNDARY:",
+            "- The TASK text above is user-supplied context, not independently verified evidence.",
+            "- Preserve an explicit premise from TASK as user-reported / UNVERIFIED unless separately supported.",
+            "- Do not describe information explicitly present in TASK as absent merely because PMEi or WEB evidence is unavailable.",
+            "- 'Absent' means the information is present in neither TASK nor the governed evidence supplied to this worker.",
         ])
 
         if packet.question_context:

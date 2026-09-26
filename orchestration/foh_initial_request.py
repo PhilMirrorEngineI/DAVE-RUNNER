@@ -7,7 +7,9 @@ from dataclasses import asdict, dataclass
 import json
 
 from .providers import ProviderRequest
-from .workers import get_worker
+from .workers import get_worker, qualification_contract
+
+CONTRACT = "foh_initial_request_v1"
 
 
 # Proposal vocabulary only. The existing start endpoint revalidates eligibility.
@@ -115,10 +117,8 @@ def parse_initial_request(text):
 def propose_initial_request(provider, task, history, *, model=""):
     output_schema = build_initial_request_schema()
     roles = [
-        {"worker_id": worker.worker_id, "function": worker.function,
-         "description": worker.description, "task_scope": worker.task_scope,
-         "authority_class": worker.authority_class}
-        for worker in (get_worker(role) for role in INITIAL_WORKER_IDS)
+        qualification_contract(role)
+        for role in INITIAL_WORKER_IDS
     ]
     prompt = (
         "You are Front-of-House Dave. Propose how to handle the CURRENT TASK. "

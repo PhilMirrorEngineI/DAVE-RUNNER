@@ -151,6 +151,13 @@ EVIDENCE DISCIPLINE
 
 Use only information present in CURRENT TASK and BOUNDED CONTEXT.
 
+USER-SUPPLIED CONTEXT
+The CURRENT TASK is user-supplied context, not independently verified evidence.
+Preserve explicit task premises as user-reported / UNVERIFIED unless separately
+supported. Do not call an explicitly supplied premise absent merely because PMEi
+or WEB retrieval did not independently verify it. "Absent" means the information
+is in neither CURRENT TASK nor BOUNDED CONTEXT.
+
 Do not claim any of the following unless the bounded context contains
 explicit evidence for it:
 - a test was run;

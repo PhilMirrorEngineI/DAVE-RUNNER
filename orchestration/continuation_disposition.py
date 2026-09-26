@@ -54,6 +54,46 @@ def disposition_schema(role):
     }
 
 
+def parse_provider_disposition_proposal(role, text):
+    """Validate provider outcome shape without allowing it to own provenance basis."""
+    schema = disposition_schema(role)
+    if type(text) is not str or not text.strip() or len(text) > 4096:
+        raise ContinuationDispositionError("Invalid disposition size.")
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ContinuationDispositionError("Duplicate disposition key.")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique)
+    except (ValueError, RecursionError) as exc:
+        raise ContinuationDispositionError("Invalid disposition JSON.") from exc
+
+    if type(value) is not dict or set(value) != set(schema["required"]):
+        raise ContinuationDispositionError("Unexpected disposition fields.")
+
+    status = value["status"]
+    layer = value["responsible_layer"]
+    basis = value["basis"]
+
+    if type(status) is not str or status not in OUTCOMES[role]:
+        raise ContinuationDispositionError("Unsupported worker outcome.")
+    if type(basis) is not str or not basis.strip() or len(basis) > 600:
+        raise ContinuationDispositionError("Invalid disposition basis.")
+    revise = role == "knobhead" and status == "REVISE_CANDIDATE"
+    if revise:
+        if type(layer) is not str or layer not in RESPONSIBLE_LAYERS:
+            raise ContinuationDispositionError("Revision requires a lawful responsible layer.")
+    elif layer is not None:
+        raise ContinuationDispositionError("Only a revision can name a responsible layer.")
+
+    return value
+
+
 def parse_disposition(role, text, accepted_work):
     schema = disposition_schema(role)
     if type(text) is not str or not text.strip() or len(text) > 4096:
@@ -110,8 +150,9 @@ def propose_disposition(executor, execution, original_task):
         f"Configured worker: {worker.worker_id}; function: {worker.function}.\n"
         "This is a candidate outcome, not approval or verification of real-world results.\n"
         "Return only the supplied JSON schema. Do not solve, expand or repair the task.\n"
-        "Use an exact quote from the accepted work as basis. A quote provides provenance, "
-        "not proof that the outcome is correct. Do not invent a missing requirement.\n"
+        "The basis field is a bounded provider proposal only. The server will replace it "
+        "with an exact excerpt from the accepted work before causal validation. A basis provides "
+        "provenance, not proof that the outcome is correct. Do not invent a missing requirement.\n"
         "Declare only an outcome supported by the actual work. NO_ACTION_REQUIRED means "
         "no additional specialist work is established; it does not mean the user's "
         "real-world task was executed or completed. HOLD means no justified disposition.\n"
@@ -125,9 +166,8 @@ def propose_disposition(executor, execution, original_task):
         "The existing engine governs any subsequent action.\n"
         "OUTPUT SCHEMA\n" + json.dumps(schema, ensure_ascii=False)
     )
-    # A short verbatim excerpt helps small models reproduce the basis exactly.
-    # This is a quoting aid only: it does not establish the outcome or relax
-    # parse_disposition's exact-substring requirement.
+    # The server selects the final exact provenance basis. Provider text may
+    # propose an outcome, but cannot own or manufacture causal provenance.
     accepted_text = execution.output_text
     suggested_basis = next(
         (line.strip() for line in accepted_text.splitlines()
@@ -135,12 +175,11 @@ def propose_disposition(executor, execution, original_task):
         accepted_text[:600],
     )
     prompt += (
-        "\nBASIS QUOTING RULE: Copy basis character-for-character from "
-        "ACCEPTED WORK PRODUCT. The following excerpt is available as a "
-        "verbatim basis if it supports your chosen status. Do not paraphrase, "
-        "alter punctuation, or claim this quote proves an outcome. If it "
-        "does not support a justified disposition, use HOLD.\n"
-        "SUGGESTED VERBATIM BASIS (copy exactly if applicable):\n"
+        "\nBASIS BINDING RULE: The server, not the provider, owns the final exact basis. "
+        "The following excerpt is the server-selected provenance basis. Your basis field will "
+        "not be trusted as causal provenance. If the accepted work does not support a justified "
+        "disposition, use HOLD.\n"
+        "SERVER-SELECTED EXACT BASIS:\n"
         + suggested_basis
     )
     request = ProviderRequest(
@@ -156,4 +195,11 @@ def propose_disposition(executor, execution, original_task):
         raise ContinuationDispositionError("Disposition provider failed.") from exc
     if response.ok is not True or (response.metadata or {}).get("done_reason") in {"length", "max_tokens"}:
         raise ContinuationDispositionError("Disposition inference did not finish successfully.")
-    return parse_disposition(role, response.output_text, execution.output_text)
+
+    proposed = parse_provider_disposition_proposal(role, response.output_text)
+    proposed["basis"] = suggested_basis
+    return parse_disposition(
+        role,
+        json.dumps(proposed, ensure_ascii=False),
+        execution.output_text,
+    )

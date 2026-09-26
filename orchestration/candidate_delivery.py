@@ -1,5 +1,7 @@
 """Deterministic delivery of recorded work. No new inference or state changes."""
 from copy import deepcopy
+
+CONTRACT = "recorded_candidate_delivery_v1"
 from .ollama_worker_transport import public_diagnostics
 
 
@@ -90,6 +92,7 @@ def assemble_delivery(steps, outcome, error=None):
         text.append("Stop detail: " + str(error))
     text.append(next_action)
     return {
+        "contract": CONTRACT,
         "kind": "recorded_candidate_assembly", "answer": primary["text"] if primary else "",
         "answer_owner": primary["worker"] if primary else None,
         "supporting_work_and_reviews": deepcopy(others), "rejected_step_count": len(rejected),
