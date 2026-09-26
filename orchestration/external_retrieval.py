@@ -1,4 +1,4 @@
-﻿from html.parser import HTMLParser
+from html.parser import HTMLParser
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -411,7 +411,23 @@ def render_external_evidence(evidence):
 
         lines.append(f"EVIDENCE: {text}")
 
-    return "\n".join(lines)
+    original = "\n".join(lines)
+
+    intro = (
+        "DAVE - EXTERNAL EVIDENCE\n\n"
+        "Right, I've found some relevant information. "
+        "Here's what the sources actually say.\n\n"
+    )
+
+    closing = (
+        "\n\nDAVE'S BOUNDARY\n"
+        "I've retrieved external evidence, not independently "
+        "verified the situation described in your question. "
+        "These excerpts are not a verified, situation-specific "
+        "plan or permission to act."
+    )
+
+    return intro + original + closing
 
 
 

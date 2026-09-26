@@ -5,6 +5,8 @@ class FakeNotepad:
     def __init__(self):
         self.normal_calls = 0
         self.historical_calls = 0
+        self.retrieval_query = None
+        self.retrieval_question = None
 
     def get_pmei_records(self):
         self.normal_calls += 1
@@ -62,7 +64,10 @@ class FakeNotepad:
         query,
         question,
         transport=None,
+        **kwargs,
     ):
+        self.retrieval_query = query
+        self.retrieval_question = question
         return [
             {
                 "source": f"PMEi Record {record['id']}",
@@ -131,3 +136,35 @@ def test_explicit_historical_request_remains_historical_mode():
     assert retrieval["ok"] is True
     assert retrieval["mode"] == "historical"
     assert adapter.notepad.historical_calls == 1
+
+def test_progress_history_uses_topic_centred_historical_retrieval():
+    adapter = build_adapter(
+        archive_search=False,
+    )
+
+    retrieval = adapter.retrieve_candidates(
+        "What have we achieved with Atlas over the last three days?"
+    )
+
+    assert retrieval["ok"] is True
+    assert retrieval["mode"] == "historical"
+    assert adapter.notepad.normal_calls == 0
+    assert adapter.notepad.historical_calls == 1
+    assert adapter.notepad.retrieval_query == "Atlas"
+    assert adapter.notepad.retrieval_question == (
+        "What have we achieved with Atlas over the last three days?"
+    )
+
+    # Topic-progress history is not actor ACTIVITY_HISTORY.
+    # The unresolved generic interpretation may remain as provenance,
+    # but it must not become an applied activity-history selection.
+    interpretation = retrieval["transport"].get(
+        "request_interpretation",
+        {},
+    )
+    assert interpretation.get("operation") == "ACTIVITY_HISTORY"
+    assert interpretation.get("ready") is False
+    assert "activity_selection" not in retrieval["transport"]
+    assert retrieval["transport"].get(
+        "activity_time_filter_applied"
+    ) is not True

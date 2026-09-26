@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from .ollama_worker_transport import receive_worker_response, WorkerTransportError
+
 
 DEFAULT_OLLAMA_URL = os.getenv(
     "OLLAMA_URL",
@@ -65,7 +67,9 @@ class ProviderResponse:
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(self, message, *, provider_diagnostics=None):
+        super().__init__(message)
+        self.provider_diagnostics = provider_diagnostics
 
 
 class ProviderUnavailableError(ProviderError):
@@ -127,10 +131,15 @@ class OllamaProvider(BaseProvider):
         num_ctx: int = DEFAULT_OLLAMA_NUM_CTX,
         num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT,
         num_gpu: int | None = None,
+        worker_max_seconds: float | None = None,
     ) -> None:
         self.base_url = str(base_url).strip().rstrip("/")
         self.model = str(model).strip()
         self.timeout = float(timeout)
+        self.worker_max_seconds = float(
+            os.getenv("OLLAMA_WORKER_MAX_SECONDS", "600")
+            if worker_max_seconds is None else worker_max_seconds
+        )
         self.num_ctx = int(num_ctx)
         self.num_predict = int(num_predict)
         self.num_gpu = (
@@ -322,6 +331,30 @@ class OllamaProvider(BaseProvider):
                     )
                 )
 
+        # Separate restrictions from factual evidence. Only the executor-bound
+        # snapshot is used; arbitrary job.context and provider output are ignored.
+        if isinstance(request.context, dict) and "task_requirements" in request.context:
+            from .task_requirements import render_task_requirements, TaskRequirementsError
+            try:
+                requirements = render_task_requirements(
+                    request.context["task_requirements"],
+                    expected_job_id=(request.metadata.get("job_id")
+                                     if isinstance(request.metadata, dict) else None),
+                    expected_worker=request.worker_role,
+                )
+            except TaskRequirementsError as exc:
+                raise ProviderError("Task requirements blocked: " + str(exc)) from exc
+            if requirements:
+                parts.append(requirements)
+
+        # The executor binds this packet to engine history and the active role.
+        # Carry it even when PMEi evidence exists; do not serialize raw history
+        # or job.context, which may contain unrelated/untrusted material.
+        if isinstance(request.context, dict) and request.context.get("worker_handoff") is not None:
+            from .worker_handoff import render_worker_handoff
+            parts.append(render_worker_handoff(
+                request.context["worker_handoff"], expected_worker=request.worker_role))
+
         parts.append(
             """EXECUTION BOUNDARY
 
@@ -389,35 +422,47 @@ Do not manufacture human approval."""
                 raise ProviderError("output_schema must be a non-empty JSON schema object.")
             payload["format"] = request.output_schema
 
-        try:
-            response = requests.post(
-                self.base_url + "/api/chat",
-                json=payload,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise ProviderUnavailableError(
-                f"Ollama request failed: {exc}"
-            ) from exc
+        diagnostics = None
+        if isinstance(request.metadata, dict) and request.metadata.get("worker_work_product") is True:
+            try:
+                data, diagnostics = receive_worker_response(
+                    self.base_url + "/api/chat", payload, timeout=self.timeout,
+                    max_seconds=self.worker_max_seconds,
+                )
+            except WorkerTransportError as exc:
+                raise ProviderUnavailableError(
+                    str(exc), provider_diagnostics=exc.provider_diagnostics,
+                ) from exc
+        else:
+            try:
+                response = requests.post(
+                    self.base_url + "/api/chat",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise ProviderUnavailableError(
+                    f"Ollama request failed: {exc}"
+                ) from exc
 
-        if not response.ok:
-            raise ProviderUnavailableError(
-                f"Ollama returned HTTP {response.status_code}: "
-                f"{response.text[:1500]}"
-            )
+            if not response.ok:
+                raise ProviderUnavailableError(
+                    f"Ollama returned HTTP {response.status_code}: "
+                    f"{response.text[:1500]}"
+                )
 
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise ProviderResponseError(
-                f"Ollama returned invalid JSON: {exc}"
-            ) from exc
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise ProviderResponseError(
+                    f"Ollama returned invalid JSON: {exc}"
+                ) from exc
 
         message = data.get("message")
 
         if not isinstance(message, dict):
             raise ProviderResponseError(
-                "Ollama response contains no message object."
+                "Ollama response contains no message object.", provider_diagnostics=diagnostics
             )
 
         raw_content = str(
@@ -442,7 +487,7 @@ Do not manufacture human approval."""
                 "Ollama generation ended inside an unfinished <think> block. "
                 "No governed worker answer was produced. "
                 f"done_reason={done_reason}; "
-                f"num_predict={self.num_predict}."
+                f"num_predict={self.num_predict}.", provider_diagnostics=diagnostics
             )
 
         output_text = self.clean_output_text(
@@ -457,11 +502,11 @@ Do not manufacture human approval."""
                 raise ProviderResponseError(
                     "Ollama exhausted the bounded prediction budget "
                     "before producing a usable worker answer. "
-                    f"num_predict={self.num_predict}."
+                    f"num_predict={self.num_predict}.", provider_diagnostics=diagnostics
                 )
 
             raise ProviderResponseError(
-                "Ollama response contains no usable output text."
+                "Ollama response contains no usable output text.", provider_diagnostics=diagnostics
             )
 
         return ProviderResponse(
@@ -472,6 +517,7 @@ Do not manufacture human approval."""
             raw=data,
             metadata={
                 "worker_role": request.worker_role,
+                **({"provider_diagnostics": diagnostics} if diagnostics else {}),
                 "base_url": self.base_url,
                 "done": data.get("done"),
                 "done_reason": done_reason,
@@ -515,4 +561,3 @@ def build_provider(
     raise ValueError(
         f"Unknown PMEi worker provider: {name}"
     )
-

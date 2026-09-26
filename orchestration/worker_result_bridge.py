@@ -19,6 +19,7 @@ from typing import Optional
 
 from .contracts import WorkerResult
 from .executor import WorkerExecution
+from .build_requirement import BuildRequirementError, validate_build_requirement
 
 
 class UnresolvedWorkerResult(RuntimeError):
@@ -102,6 +103,18 @@ class WorkerResultBridge:
                 "Governed disposition has no status."
             )
 
+        build_requirement = None
+        if execution.worker_role == "engineering" and (
+            status == "READY_FOR_BUILD" or disposition.build_required is True
+        ):
+            if status != "READY_FOR_BUILD" or disposition.build_required is not True:
+                raise UnresolvedWorkerResult("Inconsistent Engineering build disposition.")
+            try:
+                build_requirement = validate_build_requirement(
+                    metadata.get("engineering_build_requirement"))
+            except BuildRequirementError as exc:
+                raise UnresolvedWorkerResult(str(exc)) from exc
+
         return WorkerResult(
             job_id=execution.job_id,
             worker_role=execution.worker_role,
@@ -112,6 +125,7 @@ class WorkerResultBridge:
                 "provider": execution.provider,
                 "model": execution.model,
                 "validation_status": validation_status,
+                **({"build_requirement": build_requirement} if build_requirement is not None else {}),
             },
             evidence=[],
 

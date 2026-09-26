@@ -1,4 +1,4 @@
-﻿"""
+"""
 PMEi DETERMINISTIC WORKER PACKET
 
 Purpose
@@ -143,6 +143,10 @@ class WorkerPacket:
     contextual_recall: bool = False
 
     activity_context: Dict[str, Any] = field(default_factory=dict)
+
+    # Deterministic semantics of the user's question.
+    # This describes the request, not the truth/status of any evidence.
+    question_context: Dict[str, Any] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -1037,13 +1041,52 @@ class PMEiWorkerPacketBuilder:
 
         lines.extend([
             f"TASK: {packet.task}",
+        ])
+
+        if packet.question_context:
+            lines.extend([
+                "",
+                "QUESTION CONTEXT:",
+                (
+                    "Intent: "
+                    f"{packet.question_context.get('intent') or 'UNKNOWN'}"
+                ),
+                (
+                    "Temporal scope: "
+                    f"{packet.question_context.get('temporal_scope') or 'UNKNOWN'}"
+                ),
+                (
+                    "Topic: "
+                    f"{packet.question_context.get('topic') or 'UNSPECIFIED'}"
+                ),
+                (
+                    "Question context describes the request only; "
+                    "it does not promote evidence into current-state truth."
+                ),
+            ])
+
+        lines.extend([
             "",
             "RETRIEVAL STATUS:",
             (
                 "SUPPORTED"
                 if packet.evidence_sufficient
-                else
-                "NO DIRECT EVIDENCE"
+                else (
+                    "DIRECT HISTORICAL EVIDENCE - "
+                    "NO ELIGIBLE SUPPORTED STATE"
+                    if (
+                        packet.question_context.get("intent")
+                        == "PROGRESS_HISTORY"
+                        and any(
+                            position.get("task_alignment") == "DIRECT"
+                            and position.get("temporal_scope") == "HISTORICAL"
+                            and position.get("state_support")
+                            == "HISTORICAL_CONTEXT_ONLY"
+                            for position in packet.evidence_positions
+                        )
+                    )
+                    else "NO DIRECT EVIDENCE"
+                )
             ),
             (
                 f"PMEi records received: "
@@ -1083,6 +1126,13 @@ class PMEiWorkerPacketBuilder:
                 (
                     f"Historical traversal exhaustive: "
                     f"{str(packet.historical_exhaustive).lower()}"
+                ),
+                (
+                    "Historical traversal exhaustiveness applies only to "
+                    "the named retrieval route. It does not establish "
+                    "coverage of other PMEi stores, connector exposure, "
+                    "or records dating back to June 2025. Report those "
+                    "separately as UNVERIFIED unless directly evidenced."
                 ),
                 (
                     "Historical retrieval errors: "
@@ -1356,6 +1406,7 @@ class PMEiWorkerPacketBuilder:
         Multiple matching records remain separately attributed.
         """
         from .question_intent import classify_question_intent
+        from .task_deliverable import classify_task_deliverable
 
         if worker_role != "foh":
             return []
@@ -1546,7 +1597,106 @@ class PMEiWorkerPacketBuilder:
         # This does not alter task_alignment, temporal_scope or state_support.
         # -----------------------------------------------------------------
 
+        # Preserve deterministic question semantics separately from
+        # evidence qualification. Request semantics must never promote an
+        # evidence item's alignment, temporal scope, authority, or state.
+        from .question_intent import classify_question_intent
+        from .task_deliverable import classify_task_deliverable
+
+        classified_question = classify_question_intent(task)
+
+        question_context = {
+            "intent": classified_question.intent,
+            "temporal_scope": classified_question.temporal_scope,
+            "topic": classified_question.topic,
+            "deliverable": classify_task_deliverable(task),
+        }
+
         contextual_evidence = []
+
+        # -----------------------------------------------------------------
+        # PROGRESS HISTORY CONTEXT
+        # -----------------------------------------------------------------
+        #
+        # For a deterministic PROGRESS_HISTORY request, provenance-eligible
+        # evidence already admitted by retrieval may be shown to the worker
+        # as historical/progress context.
+        #
+        # This is a visibility lane only. It does not change task_alignment,
+        # temporal_scope, proposition_type, state_support, authority, or
+        # SUPPORTED STATE eligibility.
+        # -----------------------------------------------------------------
+
+        if question_context.get("intent") == "PROGRESS_HISTORY":
+
+            for item in evidence:
+
+                if not isinstance(item, dict):
+                    continue
+
+                authority_class = self.evidence_authority_class(item)
+
+                if authority_class not in {
+                    "LAWFUL_EVIDENCE",
+                    "READ_ONLY_EVIDENCE",
+                }:
+                    continue
+
+                text_value = self.clean_text(
+                    item.get("text")
+                )
+
+                if not text_value:
+                    continue
+
+                record_id = item.get("record_id")
+
+                task_alignment = self.clean_text(
+                    item.get("task_alignment")
+                ).upper()
+
+                state_support = (
+                    self.evidence_state_support_class(item)
+                )
+
+                temporal_scope = self.clean_text(
+                    item.get("temporal_scope")
+                ).upper()
+
+                proposition_type = self.clean_text(
+                    item.get("proposition_type")
+                ).upper()
+
+                seal = self.clean_text(
+                    item.get("seal")
+                )
+
+                timestamp = self.clean_text(
+                    item.get("timestamp")
+                )
+
+                entry = (
+                    f"[PMEi Record {record_id} | "
+                    f"{authority_class} | "
+                    f"{task_alignment} | "
+                    f"{state_support} | "
+                    f"temporal={temporal_scope or 'UNKNOWN'} | "
+                    f"proposition={proposition_type or 'UNKNOWN'}]\n"
+                    f"Recorded passage: {text_value}"
+                )
+
+                if timestamp:
+                    entry += (
+                        f"\nRecord saved: {timestamp} "
+                        "(continuity timestamp; not substituted for event time)."
+                    )
+
+                if seal:
+                    entry += (
+                        f"\nRecorded seal: {seal}"
+                    )
+
+                contextual_evidence.append(entry)
 
         task_lower = task.lower()
 
@@ -1849,6 +1999,7 @@ class PMEiWorkerPacketBuilder:
 
         packet = WorkerPacket(
             activity_context=activity_context,
+            question_context=question_context,
             contextual_recall=bool(recall_evidence),
             worker_role=worker_role,
 
@@ -2051,6 +2202,7 @@ def build_worker_packet_builder(
     return PMEiWorkerPacketBuilder(
         max_supported=max_supported
     )
+
 
 
 

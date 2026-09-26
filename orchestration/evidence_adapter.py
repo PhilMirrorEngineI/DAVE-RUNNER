@@ -352,6 +352,7 @@ class PMEiEvidenceAdapter:
             "scan all continuity records",
             "exhaustive historical scan",
             "exhaustive archive scan",
+            "historical retrieval path covering all stores",
         )
 
         return any(
@@ -414,7 +415,11 @@ class PMEiEvidenceAdapter:
                     additional_requested=False,
                     clarification=None,
                 )
-        if request_context.operation == "ACTIVITY_HISTORY" and not request_context.ready:
+        if (
+            request_context.operation == "ACTIVITY_HISTORY"
+            and not request_context.ready
+            and question_intent_for_retrieval.intent != "PROGRESS_HISTORY"
+        ):
             return {
                 "ok": False, "stage": "request_interpretation",
                 "question": question, "query": "", "mode": "unresolved",
@@ -430,10 +435,21 @@ class PMEiEvidenceAdapter:
             else request_context
         )
 
-        query = effective_request_context.subject if effective_request_context.ready else self.build_query(question)
-        retrieval_question = effective_request_context.subject if effective_request_context.ready else question
+        if (
+            question_intent_for_retrieval.intent == "PROGRESS_HISTORY"
+            and question_intent_for_retrieval.topic
+        ):
+            query = question_intent_for_retrieval.topic
+            retrieval_question = question
+        else:
+            query = effective_request_context.subject if effective_request_context.ready else self.build_query(question)
+            retrieval_question = effective_request_context.subject if effective_request_context.ready else question
 
-        historical = effective_request_context.ready or self.historical_scan_requested(question)
+        historical = (
+            effective_request_context.ready
+            or question_intent_for_retrieval.intent == "PROGRESS_HISTORY"
+            or self.historical_scan_requested(question)
+        )
         mode = (
             "historical"
             if historical
@@ -569,6 +585,9 @@ class PMEiEvidenceAdapter:
             # Event dates are not substituted with record-save timestamps.
 
         selection_options = {}
+
+        if question_intent_for_retrieval.intent == "PROGRESS_HISTORY":
+            selection_options["prefer_continuity_chronology"] = True
         if effective_request_context.ready:
             from .activity_evidence import make_activity_selector
             from .worker_packet import build_worker_packet_builder
@@ -796,7 +815,23 @@ class PMEiEvidenceAdapter:
             else:
                 evidence_role = "GENERAL_EVIDENCE"
 
+            # Bind an asserted source passage to its originating record/topic.
+            # Progress records remain reports even when they say "now"; this
+            # is never present-job proof or authority to act.
+            from .progress_evidence import bound_report
+            progress_facets = ()
+            source_subject = ""
+            if question_intent.intent == "PROGRESS_HISTORY":
+                progress_facets = bound_report(evidence_text, record, question_intent.topic)
+                if progress_facets:
+                    source_subject = question_intent.topic
+                    proposition_type = "HISTORICAL_REPORT"
+                    temporal_scope = "HISTORICAL"
+                    evidence_role = "GENERAL_EVIDENCE"
+
             prepared_item = {
+                "progress_facets": list(progress_facets),
+                "progress_passages": [evidence_text] if progress_facets else [],
                 "activity": dict(item.get("activity") or {}),
                 # Source-owned recall anchors and restrictions travel with evidence.
                 "anchor_points": [
@@ -926,6 +961,18 @@ class PMEiEvidenceAdapter:
                                 record.get(
                                     "seal"
                                 ),
+                            "proposition_type":
+                                proposition_type,
+                            "temporal_scope":
+                                temporal_scope,
+                            "evidence_role":
+                                evidence_role,
+                            "question_intent":
+                                question_intent.intent,
+                            "source_subject":
+                                source_subject,
+                            "progress_facets": list(progress_facets),
+                            "progress_source_bound": bool(progress_facets),
                         },
                     ),
 
@@ -986,6 +1033,19 @@ class PMEiEvidenceAdapter:
                 existing_position
             ]
 
+            if (question_intent.intent == "PROGRESS_HISTORY"
+                    and existing.get("progress_facets") and item.get("progress_facets")
+                    and existing.get("task_alignment") == item.get("task_alignment") == "DIRECT"):
+                quotes = list(existing.get("progress_passages") or [existing["text"]])
+                incoming = item["text"]
+                if incoming not in quotes and len(quotes) < 3 and sum(map(len, quotes)) + len(incoming) + len(quotes) <= 3000:
+                    quotes.append(incoming)
+                    existing["progress_passages"] = quotes
+                    existing["text"] = "\n".join(quotes)
+                    existing["progress_facets"] = list(dict.fromkeys(
+                        [*existing["progress_facets"], *item["progress_facets"]]))
+                continue
+
             existing_priority = (
                 alignment_priority.get(
                     existing.get(
@@ -1004,27 +1064,26 @@ class PMEiEvidenceAdapter:
                 )
             )
 
+            # Only for progress history: when alignment is equal, retain
+            # the more useful passage from the same source record.
+            progress_history_usefulness_tie = (
+                question_intent.intent == "PROGRESS_HISTORY"
+                and candidate_priority == existing_priority
+                and isinstance(item.get("usefulness"), (int, float))
+                and isinstance(existing.get("usefulness"), (int, float))
+                and item["usefulness"] > existing["usefulness"]
+            )
+
             if (
-                candidate_priority
-                >
-                existing_priority
+                candidate_priority > existing_priority
+                or progress_history_usefulness_tie
             ):
-                item[
-                    "_retrieval_rank"
-                ] = min(
-                    existing.get(
-                        "_retrieval_rank",
-                        0,
-                    ),
-                    item.get(
-                        "_retrieval_rank",
-                        0,
-                    ),
+                item["_retrieval_rank"] = min(
+                    existing.get("_retrieval_rank", 0),
+                    item.get("_retrieval_rank", 0),
                 )
 
-                deduplicated[
-                    existing_position
-                ] = item
+                deduplicated[existing_position] = item
 
         # ---------------------------------------------------------------------
         # PRIORITISE DIRECT, PRESERVE ORIGINAL RANK WITHIN EACH CLASS
@@ -1059,6 +1118,10 @@ class PMEiEvidenceAdapter:
                 0,
             )
         )
+
+        if question_intent.intent == "PROGRESS_HISTORY":
+            from .progress_evidence import select_coverage
+            direct = select_coverage(direct, len(direct), lambda item: item.get("progress_facets", []))
 
         ordered = (
             direct
@@ -1200,6 +1263,109 @@ class PMEiEvidenceAdapter:
                 comparison_endpoints[
                     :reserved_count
                 ]
+            )
+
+        elif (
+            question_intent.intent == "PROGRESS_HISTORY"
+            and
+            self.max_evidence > 0
+        ):
+            # PROGRESS_HISTORY preserves bounded coverage of recent relevant
+            # continuity already admitted to the qualified candidate surface.
+            #
+            # Continuity timestamp is portfolio-selection context only. It
+            # does not establish event time, CURRENT state, task alignment,
+            # proposition type, or evidence authority.
+            timestamped = [
+                item
+                for item in ordered
+                if item.get("timestamp")
+            ]
+
+            recent_item = (
+                max(
+                    timestamped,
+                    key=lambda item: str(
+                        item.get("timestamp") or ""
+                    ),
+                )
+                if timestamped
+                else None
+            )
+
+            # Preserve the existing governed-learning portfolio law as well.
+            # Learning remains evidence only and gains no DIRECT alignment,
+            # temporal promotion, or transition authority.
+            from .worker_packet import build_worker_packet_builder
+
+            authority_class = (
+                build_worker_packet_builder()
+                .evidence_authority_class
+            )
+
+            learning_item = next(
+                (
+                    item
+                    for item in ordered
+                    if (
+                        isinstance(
+                            item.get("learning_layer"),
+                            dict,
+                        )
+                        and
+                        any(
+                            bool(value)
+                            for value in item[
+                                "learning_layer"
+                            ].values()
+                        )
+                        and
+                        authority_class(item)
+                        in {
+                            "LAWFUL_EVIDENCE",
+                            "READ_ONLY_EVIDENCE",
+                        }
+                    )
+                ),
+                None,
+            )
+
+            reserved = []
+
+            for item in (
+                recent_item,
+                learning_item,
+            ):
+                if (
+                    item is not None
+                    and
+                    item not in reserved
+                    and
+                    item not in ordered[:self.max_evidence]
+                ):
+                    reserved.append(item)
+
+            reserved = reserved[
+                :self.max_evidence
+            ]
+
+            ordinary_capacity = (
+                self.max_evidence
+                - len(reserved)
+            )
+
+            without_reserved = [
+                item
+                for item in ordered
+                if item not in reserved
+            ]
+
+            bounded = (
+                without_reserved[
+                    :ordinary_capacity
+                ]
+                +
+                reserved
             )
 
         elif (
@@ -1373,6 +1539,19 @@ class PMEiEvidenceAdapter:
                 "_retrieval_rank",
                 None,
             )
+
+        if question_intent.intent == "PROGRESS_HISTORY":
+            transport = dict(transport)
+            transport["progress_selection"] = {
+                "candidate_passages": len(evidence),
+                "candidate_records": len({item.get("record_id") for item in evidence if isinstance(item, dict)}),
+                "selected_records": len(bounded),
+                "selected_direct_reports": sum(item.get("task_alignment") == "DIRECT" and item.get("temporal_scope") == "HISTORICAL" for item in bounded),
+                "covered_facets": sorted({facet for item in bounded for facet in item.get("progress_facets", [])}),
+                "record_time_is_event_time": False,
+                "current_runtime_proven": False,
+            }
+
 
         return EvidencePacket(
             question=question,

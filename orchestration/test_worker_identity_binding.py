@@ -1,4 +1,4 @@
-﻿import tempfile
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -56,7 +56,7 @@ class WorkerIdentityTests(unittest.TestCase):
         self.job(task='Continuity: PMEi architecture')
         original = self.executor.system_prompt_for_worker('engineering', source_route='PMEI_LOOKUP')
         self.executor.execute('engineering')
-        self.assertTrue(self.provider.requests[0].system_prompt.endswith(original))
+        self.assertIn(original, self.provider.requests[0].system_prompt)
 
 if __name__ == '__main__':
     unittest.main()

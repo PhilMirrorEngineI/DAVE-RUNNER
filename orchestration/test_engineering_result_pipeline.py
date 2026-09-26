@@ -7,6 +7,7 @@ Neither layer chooses the successor.
 """
 
 from orchestration.executor import WorkerExecution
+from orchestration.test_build_requirement import valid_requirement
 from orchestration.worker_disposition import (
     parse_engineering_disposition,
 )
@@ -27,6 +28,7 @@ def _execution(output_text):
         metadata={
             "validation_status": "ACCEPT",
             "transition_authority": False,
+            "engineering_build_requirement": valid_requirement(),
         },
     )
 

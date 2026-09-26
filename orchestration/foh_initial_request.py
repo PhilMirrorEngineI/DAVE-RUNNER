@@ -25,6 +25,37 @@ def build_initial_request_schema():
         },
         "required": ["action", "requested_worker", "question"],
         "additionalProperties": False,
+        "oneOf": [
+            {
+                "properties": {
+                    "action": {"const": "REQUEST_WORKER"},
+                    "requested_worker": {
+                        "type": "string",
+                        "enum": list(INITIAL_WORKER_IDS),
+                    },
+                    "question": {"type": "null"},
+                },
+                "required": ["action", "requested_worker", "question"],
+            },
+            {
+                "properties": {
+                    "action": {"const": "CLARIFY"},
+                    "requested_worker": {"type": "null"},
+                    "question": {
+                        "type": "string", "minLength": 1, "maxLength": 500,
+                    },
+                },
+                "required": ["action", "requested_worker", "question"],
+            },
+            {
+                "properties": {
+                    "action": {"const": "CHAT"},
+                    "requested_worker": {"type": "null"},
+                    "question": {"type": "null"},
+                },
+                "required": ["action", "requested_worker", "question"],
+            },
+        ],
     }
 
 
@@ -85,7 +116,8 @@ def propose_initial_request(provider, task, history, *, model=""):
     output_schema = build_initial_request_schema()
     roles = [
         {"worker_id": worker.worker_id, "function": worker.function,
-         "description": worker.description, "authority_class": worker.authority_class}
+         "description": worker.description, "task_scope": worker.task_scope,
+         "authority_class": worker.authority_class}
         for worker in (get_worker(role) for role in INITIAL_WORKER_IDS)
     ]
     prompt = (
@@ -96,7 +128,9 @@ def propose_initial_request(provider, task, history, *, model=""):
         "Worker function labels describe responsibilities; never use them as actions.\n"
         "For a self-contained request for specialist work, use action REQUEST_WORKER, "
         "requested_worker equal to one worker_id from the registry below, and question null. "
-        "Choose the appropriate initial worker by its defined function. Ordinary real-world "
+        "The question field MUST be JSON null for REQUEST_WORKER, never a rewritten "
+        "version of the task. The original user task is passed unchanged to the worker. "
+        "Choose the appropriate initial worker by its defined function and task_scope. Task scope describes suitability for the requested work; it does not grant authority, establish evidence, or prove professional qualification. Ordinary real-world "
         "tasks can need specialist work; do not require PMEi wording or a named worker.\n"
         "For casual conversation or discussion without a specialist work request, use "
         'action CHAT, requested_worker null, question null.\n'

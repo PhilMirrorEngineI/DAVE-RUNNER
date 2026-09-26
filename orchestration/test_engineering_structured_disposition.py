@@ -3,6 +3,7 @@
     build_engineering_disposition_schema,
     parse_structured_engineering_disposition,
 )
+from orchestration.test_build_requirement import valid_requirement, reply
 
 
 def test_engineering_disposition_schema_has_only_lawful_statuses():
@@ -14,7 +15,7 @@ def test_engineering_disposition_schema_has_only_lawful_statuses():
         "READY_FOR_BUILD",
     ]
     assert schema["properties"]["build_required"]["type"] == "boolean"
-    assert schema["required"] == ["status", "build_required"]
+    assert schema["required"] == ["status", "build_required", "build_requirement"]
     assert schema["additionalProperties"] is False
 
 
@@ -29,7 +30,7 @@ def test_structured_no_build_disposition_is_accepted():
 
 def test_structured_ready_for_build_disposition_is_accepted():
     disposition = parse_structured_engineering_disposition(
-        '{"status":"READY_FOR_BUILD","build_required":true}'
+        reply(valid_requirement())
     )
 
     assert disposition.status == "READY_FOR_BUILD"

@@ -1,6 +1,7 @@
 ﻿import pytest
 
 from orchestration.providers import ProviderResponse
+from orchestration.test_build_requirement import valid_requirement, reply
 from orchestration.worker_disposition import (
     EngineeringDispositionError,
     propose_engineering_disposition,
@@ -86,13 +87,14 @@ def test_proposal_uses_one_bounded_structured_request():
 def test_ready_for_build_proposal_is_accepted():
     provider = FakeProvider(
         make_response(
-            '{"status":"READY_FOR_BUILD","build_required":true}'
+            reply(valid_requirement())
         )
     )
 
     disposition = propose_engineering_disposition(
         provider,
         "accepted engineering work product",
+        original_task="Implement a bounded change.",
     )
 
     assert disposition.status == "READY_FOR_BUILD"

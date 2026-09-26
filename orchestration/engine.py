@@ -181,19 +181,9 @@ class OrchestrationEngine:
                 {}
             ),
 
-            constraints=(
-                payload.get(
-                    "constraints"
-                )
-                if isinstance(
-                    payload.get(
-                        "constraints"
-                    ),
-                    list,
-                )
-                else
-                []
-            ),
+            # Preserve malformed recorded restrictions for executor rejection.
+            # Restoring a job must not silently erase them into an empty list.
+            constraints=payload.get("constraints", []),
         )
 
     def _result_from_payload(

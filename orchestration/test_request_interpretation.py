@@ -32,6 +32,17 @@ class TestRequestInterpretation(unittest.TestCase):
                 self.assertEqual(r.subject,'Alex')
                 self.assertEqual(r.start_date,'2025-09-15')
 
+    def test_achieved_is_activity_history_grammar(self):
+        r=interpret_request(
+            'What has Atlas achieved over the past three days?',
+            reference_date=DAY
+        )
+        self.assertTrue(r.ready)
+        self.assertEqual(r.operation,'ACTIVITY_HISTORY')
+        self.assertEqual(r.subject,'Atlas')
+        self.assertEqual((r.start_date,r.end_date),('2026-09-12','2026-09-15'))
+        self.assertEqual(r.time_basis,'EVENT_TIME')
+
     def test_no_period_is_unbounded_not_invented(self):
         r=interpret_request('What has Alex been doing?',reference_date=DAY)
         self.assertTrue(r.ready)

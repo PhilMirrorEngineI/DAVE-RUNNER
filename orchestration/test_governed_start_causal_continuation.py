@@ -1,4 +1,4 @@
-﻿"""
+"""
 Production-route regression for governed causal continuation.
 
 The existing /orchestration/request-worker route owns the real
@@ -14,8 +14,13 @@ Required behaviour:
 - HTTP/provider/FOH authority remains transition_authority=False.
 """
 
+import pytest
+from orchestration.continuation_test_support import inline_continuation, single_step_continuation, job_result
+pytestmark = pytest.mark.usefixtures("single_step_continuation")
+
 from orchestration import webapp
 from orchestration.executor import WorkerExecution
+from orchestration.test_build_requirement import valid_requirement
 from orchestration.transitions import HUMAN_GATE
 
 
@@ -48,7 +53,7 @@ def test_accepted_engineering_without_disposition_remains_candidate_only(
     monkeypatch.setattr(
         webapp.executor,
         "execute",
-        lambda job_id: execution,
+        lambda job_id: __import__("dataclasses").replace(execution, job_id=job_id),
     )
 
     client = webapp.app.test_client()
@@ -60,10 +65,11 @@ def test_accepted_engineering_without_disposition_remains_candidate_only(
 
     assert response.status_code == 202
 
-    body = response.get_json()
+    body = job_result(response, client)
     state = webapp.engine.get_state(body["job_id"])
 
-    assert body["ok"] is True
+    assert body["ok"] is False
+    assert body["execution"]["ok"] is True
     assert body["transition_authority"] is False
     assert body["execution"]["transition_authority"] is False
 
@@ -92,6 +98,8 @@ status: READY_FOR_BUILD
 build_required: true
 """,
             metadata={
+                "engineering_disposition": {'status': 'READY_FOR_BUILD', 'build_required': True},
+                "engineering_build_requirement": valid_requirement(),
                 "validation_status": "ACCEPT",
                 "transition_authority": False,
             },
@@ -112,7 +120,7 @@ build_required: true
 
     assert response.status_code == 202
 
-    body = response.get_json()
+    body = job_result(response, client)
     state = webapp.engine.get_state(body["job_id"])
 
     # External/request authority has NOT changed.
@@ -153,6 +161,7 @@ status: NO_BUILD_REQUIRED
 build_required: false
 """,
             metadata={
+                "engineering_disposition": {'status': 'NO_BUILD_REQUIRED', 'build_required': False},
                 "validation_status": "ACCEPT",
                 "transition_authority": False,
             },
@@ -173,7 +182,7 @@ build_required: false
 
     assert response.status_code == 202
 
-    body = response.get_json()
+    body = job_result(response, client)
     state = webapp.engine.get_state(body["job_id"])
 
     assert body["transition_authority"] is False

@@ -56,7 +56,7 @@ def text_mentions_subject(text, subject):
 
 _ACTIVITY_PATTERNS = (
     r"what(?:\s+(?P<else>else))?\s+(?:has|have|had)\s+(?P<subject>.+?)\s+been\s+(?:doing|working\s+on)(?P<tail>.*)",
-    r"what(?:\s+(?P<else>else))?\s+(?:has|have|had)\s+(?P<subject>.+?)\s+done(?P<tail>.*)",
+    r"what(?:\s+(?P<else>else))?\s+(?:has|have|had)\s+(?P<subject>.+?)\s+(?:done|achieved)(?P<tail>.*)",
     r"what(?:\s+(?P<else>else))?\s+did\s+(?P<subject>.+?)\s+do(?P<tail>.*)",
     r"(?:summari[sz]e|show|list)\s+(?P<subject>.+?)(?:'s|’s)\s+activities(?P<tail>.*)",
 )

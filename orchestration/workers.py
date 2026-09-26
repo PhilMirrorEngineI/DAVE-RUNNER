@@ -9,6 +9,7 @@ class WorkerDefinition:
     function: str
     authority_class: str
     description: str
+    task_scope: str = ""
 
     can_build: bool = False
     can_verify: bool = False
@@ -26,6 +27,12 @@ WORKERS: Dict[str, WorkerDefinition] = {
             "role placement and architectural consistency. "
             "Does not build or approve."
         ),
+        task_scope=(
+            "Software and system architecture work: component structure, boundaries, "
+            "contracts, role placement, coupling and architectural consistency. "
+            "Not physical or building architecture merely because the task uses "
+            "architectural language."
+        ),
     ),
 
     "engineering": WorkerDefinition(
@@ -36,6 +43,10 @@ WORKERS: Dict[str, WorkerDefinition] = {
         description=(
             "Produces bounded engineering interpretation, "
             "implementation requirements and repair specifications."
+        ),
+        task_scope=(
+            "Bounded technical and engineering analysis, implementation requirements, "
+            "repair or recovery specifications, and practical technical planning."
         ),
     ),
 
@@ -48,6 +59,10 @@ WORKERS: Dict[str, WorkerDefinition] = {
             "Reviews authority separation, provenance, human control "
             "and contract compliance. Does not implement."
         ),
+        task_scope=(
+            "Governance work concerning authority separation, provenance, human control, "
+            "and contract or policy compliance."
+        ),
     ),
 
     "findings": WorkerDefinition(
@@ -59,6 +74,10 @@ WORKERS: Dict[str, WorkerDefinition] = {
             "Performs independent read-only inspection and identifies "
             "evidence, contradictions, gaps and bounded findings."
         ),
+        task_scope=(
+            "Read-only evidence-oriented investigation: supported findings, "
+            "contradictions, gaps and missing evidence."
+        ),
     ),
 
     "steward": WorkerDefinition(
@@ -69,6 +88,10 @@ WORKERS: Dict[str, WorkerDefinition] = {
         description=(
             "Reviews continuity health, lineage, duplication, "
             "current-state orientation and archival coherence."
+        ),
+        task_scope=(
+            "Continuity stewardship: lineage, duplication, current-state orientation, "
+            "canonicalisation and archival coherence."
         ),
     ),
 

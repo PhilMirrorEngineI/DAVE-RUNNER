@@ -1,4 +1,4 @@
-﻿"""
+"""
 PMEi DETERMINISTIC WORKER OUTPUT VALIDATOR
 
 Purpose
@@ -48,7 +48,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from .task_requirements import TaskRequirementsError, render_task_requirements
 
 
 @dataclass
@@ -117,7 +118,32 @@ class WorkerOutputValidator:
         "HANDOFF NOTES",
         "ADVERSARIAL FINDINGS",
         "VERIFICATION DISPOSITION",
+        "GOVERNED DISPOSITION",
     }
+
+    ENGINEERING_SECTIONS = {
+        "SUPPORTED EVIDENCE", "ENGINEERING ANALYSIS", "UNVERIFIED",
+        "BUILDER REQUIREMENT", "GOVERNED DISPOSITION",
+    }
+
+    def packet_worker_role(self, worker_packet_text: str) -> str:
+        """Read the renderer-owned opening, never a role inside task/evidence."""
+        match = re.match(
+            r"\APMEI GOVERNED WORKER PACKET\s+CURRENT WORKER: ([a-z]+)(?:\r?\n|$)",
+            str(worker_packet_text or "").strip(),
+        )
+        return match.group(1) if match else ""
+
+    def output_heading(self, line: str):
+        """Recognise normal heading formatting without discarding inline text."""
+        plain = re.sub(r"^#{1,6}\s+", "", line).strip()
+        # Support **HEADING:** text as well as **HEADING**: text.
+        plain = re.sub(r"^\*\*([^*]+)\*\*", r"\1", plain)
+        for header in self.SECTION_HEADERS:
+            match = re.fullmatch(re.escape(header) + r"\s*(?::\s*(.*))?", plain, re.I)
+            if match:
+                return header, match.group(1) or ""
+        return None
 
     NO_SUPPORTED_STATE_MARKERS = (
         "no eligible supported state",
@@ -219,6 +245,8 @@ class WorkerOutputValidator:
     def split_claims_with_sections(
         self,
         output_text: str,
+        *,
+        default_section: str = "",
     ) -> List[
         Tuple[str, str]
     ]:
@@ -237,9 +265,11 @@ class WorkerOutputValidator:
             return []
 
         claims = []
-        current_section = ""
+        current_section = default_section
+        engineering = default_section == "ENGINEERING ANALYSIS"
+        lines = iter(text.splitlines())
 
-        for raw_line in text.splitlines():
+        for raw_line in lines:
 
             line = self.clean_text(
                 raw_line
@@ -248,10 +278,59 @@ class WorkerOutputValidator:
             if not line:
                 continue
 
-            upper = line.upper()
+            fence = re.fullmatch(r"(`{3,}|~{3,})[^`~]*", line)
+            if engineering and fence:
+                delimiter = fence.group(1)
+                block = [raw_line]
+                closed = False
+                for code_line in lines:
+                    block.append(code_line)
+                    if re.fullmatch(re.escape(delimiter[0]) + "{" + str(len(delimiter)) + r",}\s*", code_line.strip()):
+                        closed = True
+                        break
+                previous = claims[-1] if claims else ("", "")
+                bounded = (
+                    current_section == "ENGINEERING ANALYSIS"
+                    and previous[0] == current_section
+                    and (self.claim_is_explicitly_inference(previous[1])
+                         or self.claim_is_explicitly_unverified_label(previous[1]))
+                    and bool(re.sub(r"^(?:INFERENCE|UNVERIFIED)\s*:\s*", "",
+                                    previous[1], flags=re.I).strip())
+                )
+                section = ("CANDIDATE_CODE" if bounded else "UNBOUNDED_CANDIDATE_CODE") if closed else "UNCLOSED_CODE_BLOCK"
+                claims.append((section, "\n".join(block)))
+                continue
 
-            if upper in self.SECTION_HEADERS:
-                current_section = upper
+            heading = self.output_heading(line)
+            if heading:
+                header, inline = heading
+                current_section = (default_section if engineering and header not in self.ENGINEERING_SECTIONS else header)
+                if inline:
+                    # An inline UNVERIFIED label belongs to this claim only.
+                    claim = "UNVERIFIED: " + inline if header == "UNVERIFIED" else inline
+                    claims.append((current_section, claim))
+                continue
+
+            # A model-chosen heading must not carry a previous evidence/gap
+            # section's exemption over a new plan. No domain heading allowlist.
+            if engineering and not (self.claim_is_explicitly_inference(line)
+                                    or self.claim_is_explicitly_unverified_label(line)):
+                plain = re.sub(r"^#{1,6}\s+", "", line).strip().strip("*").strip()
+                inline_heading = re.fullmatch(r"([A-Z][A-Z0-9 /_-]{1,80}):\s*(.+)", plain)
+                if inline_heading:
+                    current_section = default_section
+                    claims.append((current_section, inline_heading.group(2)))
+                    continue
+                if (re.fullmatch(r"[A-Z][A-Z0-9 /_-]{1,80}:?", plain)
+                        or re.fullmatch(r"[A-Za-z][A-Za-z0-9 /_-]{1,80}:", plain)
+                        or re.match(r"^#{1,6}\s+", line)):
+                    current_section = default_section
+                    # An unknown heading can itself be an imperative/claim.
+                    # Retain it for checking rather than silently exempt it.
+                    claims.append((current_section, plain))
+                    continue
+
+            if line in {"---", "***", "___"}:
                 continue
 
             claims.append(
@@ -279,24 +358,199 @@ class WorkerOutputValidator:
             )
         ]
 
+    def is_record_scoped_historical_report(self, claim: str) -> bool:
+        """Recognise a narrowly attributed historical report, not a job result.
+
+        Only a record-scoped opening is exempted from the current-job event
+        keyword gate. Independent claims about this job are still inspected.
+        This does not establish the truth or authority of the source record.
+        """
+        text = self.clean_text(claim)
+        if not re.match(
+            r"^(?:HISTORICAL REPORT ONLY:\s*PMEi Record\s+\d+\s+records\b"
+            r"|[-*]\s*Record\s+\d+\s*:)",
+            text, re.IGNORECASE,
+        ):
+            return False
+        # A record label must not mask an independent positive current-job claim.
+        if re.search(
+            r"\b(?:this|the|our)\s+(?:current\s+)?job\b.{0,100}"
+            r"\b(?:has|have|was|were|is|are)\s+(?:been\s+)?"
+            r"(?:completed|built|executed|tested|verified|approved|deployed)\b",
+            text, re.IGNORECASE,
+        ):
+            return False
+        return True
+
     def looks_like_current_job_event_claim(
         self,
         claim: str,
     ) -> bool:
+        """
+        Match positive current-job events without treating a negated
+        event as completed. Evaluate independent clauses separately.
+        """
+        lower = self.clean_text(claim).lower()
 
-        lower = self.clean_text(
-            claim
-        ).lower()
+        clauses = self.event_clauses(lower)
 
-        for pattern in self.CURRENT_JOB_EVENT_PATTERNS:
+        for clause in clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
 
+            # A negative promotion statement does not assert approval.
+            # Keep this narrow: positive approval claims must still match.
             if re.search(
-                pattern,
-                lower,
+                r"\bno\s+promotion\s+of\b",
+                clause,
             ):
-                return True
+                clause = re.sub(
+                    r"\bhuman-approved\s+truth\b",
+                    "human truth",
+                    clause,
+                )
+
+            # A negated event is not a positive execution claim.
+            # Do not let negation in a different clause mask this one.
+            event = r"(?:executed|completed|built|deployed|tested|verified|approved|granted|produced|passed|failed)"
+            adverb = r"(?:(?:independently|fully|yet|actually|currently|successfully|formally)\s+){0,3}"
+            events = event + r"(?:\s+(?:or|nor)\s+" + adverb + event + r")*\b"
+            subject = r"(?:implementation|deployment|state transition|code(?: execution)?|build|tests?|testing|verification|human approval|approval|execution|worker)"
+            subjects = subject + r"(?:(?:,\s*(?:(?:or|nor)\s+)?|\s+(?:or|nor)\s+)" + subject + r")*"
+            clause = re.sub(
+                r"\bno\s+" + subjects + r"\s+(?:has|have|had|was|were|is|are)\s+"
+                + r"(?:been\s+)?" + adverb + events,
+                " ", clause,
+            )
+            clause = re.sub(
+                r"\bno\b.{0,160}?\b(?:has|have|had)\s+been\s+(?:[a-z]+\s+(?:or|nor)\s+)?"
+                + adverb + events,
+                " ", clause,
+            )
+            clause = re.sub(
+                r"\b(?:not|never)\s+" + adverb + r"(?:been\s+)?" + adverb + events,
+                " ", clause,
+            )
+            clause = re.sub(
+                r"\bwithout\s+" + adverb + events,
+                " ", clause,
+            )
+            clause = re.sub(
+                r"\bno\s+" + adverb + events,
+                " ", clause,
+            )
+
+            for pattern in self.CURRENT_JOB_EVENT_PATTERNS:
+                if re.search(pattern, clause):
+                    return True
 
         return False
+
+    def event_clauses(self, claim: str) -> List[str]:
+        """Keep a separate positive event outside a preceding bounded clause."""
+        return re.split(
+            r"(?<=[.!?])\s+|;\s*|\s*[,]?\s+\b(?:but|however)\s+|"
+            r"\s+and\s+(?=(?:the\s+)?(?:human\s+)?"
+            r"(?:approval|build|code|deployment|implementation|tests?|verification)\b)",
+            self.clean_text(claim), flags=re.IGNORECASE,
+        )
+
+    def historical_passages_by_record(self, worker_packet_text: str) -> Dict[str, str]:
+        """Read only the existing renderer's qualified historical evidence blocks.
+
+        Task text, learning, external snippets and save timestamps cannot become
+        historical passage support. Both position and contextual metadata must
+        agree. Duplicate or contradictory record blocks fail closed.
+        """
+        lines = [self.clean_text(line) for line in str(worker_packet_text or "").splitlines()]
+
+        def section(start, end):
+            if lines.count(start) != 1 or lines.count(end) != 1:
+                return []
+            first, last = lines.index(start), lines.index(end)
+            return lines[first + 1:last] if first < last else []
+
+        positions = {}
+        duplicates = set()
+        for line in section("EVIDENCE POSITION:", "GOVERNED LEARNING: NOT CURRENT-STATE EVIDENCE"):
+            match = re.fullmatch(r"- Record (\d+) \| (.+)", line)
+            if not match:
+                continue
+            record_id = match.group(1)
+            fields = match.group(2).split(" | ")
+            if record_id in positions:
+                duplicates.add(record_id)
+            positions[record_id] = fields
+
+        provenance = section("PROVENANCE FILTER:", "CURRENT-JOB UNVERIFIED:")
+        if not provenance:
+            return {}
+        excluded = set()
+        for line in provenance:
+            if line.startswith("Authority-excluded records:"):
+                excluded.update(re.findall(r"\b\d+\b", line.split(":", 1)[1]))
+
+        required = {"proposition=HISTORICAL_REPORT", "temporal=HISTORICAL",
+                    "task=DIRECT", "state_support=HISTORICAL_CONTEXT_ONLY"}
+        blocks = {}
+        seen_headers = set()
+        record_id = None
+        for line in section("CONTEXTUAL EVIDENCE ? NOT CURRENT-STATE PROOF:", "STATE SUPPORT BOUNDARY:"):
+            if line.startswith("- ["):
+                record_id = None  # Never carry a passage across a malformed/new header.
+                identity = re.match(r"- \[PMEi Record (\d+) \|", line)
+                if identity:
+                    if identity.group(1) in seen_headers:
+                        duplicates.add(identity.group(1))
+                    seen_headers.add(identity.group(1))
+                match = re.fullmatch(
+                    r"- \[PMEi Record (\d+) \| (READ_ONLY_EVIDENCE|LAWFUL_EVIDENCE)"
+                    r" \| DIRECT \| HISTORICAL_CONTEXT_ONLY \| temporal=HISTORICAL"
+                    r" \| proposition=HISTORICAL_REPORT\]", line,
+                )
+                if match:
+                    record_id = match.group(1)
+                    blocks.setdefault(record_id, [])
+            elif record_id and line.startswith("Recorded passage: "):
+                blocks[record_id].append(line[len("Recorded passage: "):])
+
+        return {
+            key: passages[0] for key, passages in blocks.items()
+            if key not in duplicates | excluded and len(passages) == 1 and passages[0]
+            and len(positions.get(key, [])) == 5
+            and any(field.startswith("role=") for field in positions[key])
+            and required.issubset(positions.get(key, []))
+        }
+
+    def historical_report_error(self, claim: str, passages: Dict[str, str]) -> str:
+        """Validate the entire attributed report; the label alone grants nothing."""
+        match = re.fullmatch(
+            r"HISTORICAL REPORT ONLY: PMEi Record (\d+) records a reported result"
+            r"(?: dated (\d{4}-\d{2}-\d{2}))?: (.+) "
+            r"This is not independently verified and is not evidence of current-job execution\.",
+            self.clean_text(claim).lstrip("-* "),
+        )
+        if not match:
+            return "Use a complete attributed historical report with its current-job limitation; the label alone is not evidence."
+        record_id, event_date, outcome = match.groups()
+        passage = passages.get(record_id)
+        if not passage:
+            return "The cited record is not qualified DIRECT historical report evidence in this packet."
+
+        # Require complete verbatim sentences from this record, including any
+        # semicolon/contrastive limitation. No paraphrase or cross-record search.
+        supported = False
+        for found in re.finditer(re.escape(outcome), passage):
+            left, right = passage[:found.start()].rstrip(), passage[found.end():].lstrip()
+            if (not left or left[-1] in ".!?") and (not right or outcome[-1] in ".!?"):
+                supported = True
+                break
+        if not supported:
+            return "The outcome must preserve complete quoted sentences from the cited record, including their limiting clauses."
+        if event_date and not re.search(r"(?<!\w)" + re.escape(event_date) + r"(?!\w)", outcome):
+            return "The event date is absent from the quoted outcome. A record-save timestamp must not be substituted; omit the date."
+        return ""
 
     def claim_is_explicitly_unverified(
         self,
@@ -316,7 +570,11 @@ class WorkerOutputValidator:
             or
             "not established" in lower
             or
-            "no evidence" in lower
+            (
+                "no evidence" in lower
+                and
+                not self.looks_like_current_job_event_claim(claim)
+            )
         )
 
     def claim_is_explicitly_inference(
@@ -814,11 +1072,29 @@ class WorkerOutputValidator:
         self,
         output_text: str,
         worker_packet_text: str,
+        task_requirements: Optional[Dict[str, Any]] = None,
+        expected_job_id: Optional[str] = None,
+        expected_worker: Optional[str] = None,
     ) -> ValidationResult:
 
+        recorded_constraints: List[str] = []
+        if task_requirements is not None:
+            try:
+                render_task_requirements(
+                    task_requirements,
+                    expected_job_id=expected_job_id,
+                    expected_worker=expected_worker,
+                )
+            except TaskRequirementsError:
+                task_requirements = None
+            else:
+                recorded_constraints = list(task_requirements["constraints"])
+
+        engineering = self.packet_worker_role(worker_packet_text) == "engineering"
         section_claims = (
             self.split_claims_with_sections(
-                output_text
+                output_text,
+                default_section="ENGINEERING ANALYSIS" if engineering else "",
             )
         )
 
@@ -838,16 +1114,134 @@ class WorkerOutputValidator:
             )
         )
 
+        historical_passages = self.historical_passages_by_record(worker_packet_text)
+
         for (
             section,
             claim,
         ) in section_claims:
+
+            if section in {"UNCLOSED_CODE_BLOCK", "UNBOUNDED_CANDIDATE_CODE"}:
+                issues.append(ValidationIssue(
+                    rule_id=section, severity="ERROR", claim=claim[:240],
+                    reason="Candidate code must be a closed fenced block immediately introduced by an explicit INFERENCE or UNVERIFIED proposal in Engineering Analysis. It is not executed or verified.",
+                ))
+                continue
+            if section == "CANDIDATE_CODE":
+                # Literal candidate code is not an assertion of executed work.
+                # This does not inspect its semantics or establish correctness.
+                continue
+
+            # A recorded task requirement may be reported as provenance, but it
+            # is not evidential support, a current-state fact, procedure
+            # certification, or additional authority.
+            claim_normalised = self.normalise_for_support(claim)
+            task_requirement_attribution = (
+                engineering
+                and section == "SUPPORTED EVIDENCE"
+                and bool(
+                    re.search(
+                        r"\btask\s+(?:constraint|requirement)\b",
+                        claim_normalised,
+                    )
+                )
+                and any(
+                    self.normalise_for_support(constraint)
+                    and self.normalise_for_support(constraint) in claim_normalised
+                    for constraint in recorded_constraints
+                )
+            )
+
+            # A numbered/bulleted action cannot evade analysis checks merely by
+            # appearing under SUPPORTED EVIDENCE, UNVERIFIED or a build heading.
+            # Exact attribution of an identity-bound recorded task requirement is
+            # provenance only and does not enter the evidence-support contract.
+            if (
+                engineering
+                and re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", claim)
+                and not task_requirement_attribution
+            ):
+                section = "ENGINEERING ANALYSIS"
+
+            if self.clean_text(claim).lstrip("-* ").upper().startswith("HISTORICAL REPORT ONLY:"):
+                error = self.historical_report_error(claim, historical_passages)
+                if error:
+                    issues.append(ValidationIssue(
+                        rule_id="HISTORICAL_REPORT_UNSUPPORTED", severity="ERROR",
+                        claim=claim, reason=error,
+                    ))
+                # A validated line contains only an attributed, source-bound
+                # historical outcome and its limitation, not a current-state
+                # assertion. Invalid reports have already failed closed above.
+                continue
 
             explicitly_bounded = (
                 self.claim_is_explicitly_bounded(
                     claim
                 )
             )
+            analysis_bounded = (self.claim_is_explicitly_inference(claim)
+                                or self.claim_is_explicitly_unverified_label(claim))
+
+            # -----------------------------------------------------------------
+            # HISTORICAL COVERAGE SCOPE GATE
+            # -----------------------------------------------------------------
+
+            packet_lower = self.clean_text(
+                worker_packet_text
+            ).lower()
+            claim_lower = self.clean_text(
+                claim
+            ).lower()
+
+            continuity_only_packet = (
+                "retrieval route: /memory/continuity/get" in packet_lower
+                and
+                "historical traversal exhaustive: true" in packet_lower
+                and
+                "no direct evidence" in packet_lower
+            )
+
+            claims_all_store_coverage = (
+                re.search(
+                    r"\b(?:all|every)\s+(?:pmei\s+|api\s+)?stores?\b",
+                    claim_lower,
+                )
+                is not None
+                and
+                re.search(
+                    r"\b(?:complete|full|exhaustive|entire|comprehensive)\b",
+                    claim_lower,
+                )
+                is not None
+                and
+                re.search(
+                    r"\b(?:coverage|history|historical|retrieval)\b",
+                    claim_lower,
+                )
+                is not None
+            )
+
+            if (
+                continuity_only_packet
+                and
+                claims_all_store_coverage
+                and
+                not explicitly_bounded
+            ):
+                issues.append(
+                    ValidationIssue(
+                        rule_id="HISTORICAL_COVERAGE_SCOPE_UNSUPPORTED",
+                        severity="ERROR",
+                        claim=claim,
+                        reason=(
+                            "An exhaustive continuity traversal does not "
+                            "establish complete coverage of all PMEi API "
+                            "stores. Wider coverage remains UNVERIFIED."
+                        ),
+                    )
+                )
+                continue
 
             # -----------------------------------------------------------------
             # RECORD-SCOPED CURRENT-STATE ELIGIBILITY GATE
@@ -925,12 +1319,12 @@ class WorkerOutputValidator:
             # -----------------------------------------------------------------
 
             if (
-                not explicitly_bounded
-                and
                 packet_unverified
                 and
-                self.looks_like_current_job_event_claim(
-                    claim
+                any(
+                    not self.claim_is_explicitly_bounded(clause)
+                    and self.looks_like_current_job_event_claim(clause)
+                    for clause in self.event_clauses(claim)
                 )
             ):
 
@@ -964,7 +1358,7 @@ class WorkerOutputValidator:
                 and
                 packet_no_supported_state
                 and
-                not explicitly_bounded
+                not analysis_bounded
             ):
 
                 issues.append(
@@ -998,7 +1392,7 @@ class WorkerOutputValidator:
                 ==
                 "ENGINEERING ANALYSIS"
                 and
-                not explicitly_bounded
+                not analysis_bounded
                 and
                 self.packet_has_state_support_metadata(
                     worker_packet_text
@@ -1045,7 +1439,7 @@ class WorkerOutputValidator:
                 ==
                 "ENGINEERING ANALYSIS"
                 and
-                not explicitly_bounded
+                not analysis_bounded
                 and
                 not self.claim_is_supported_by_packet(
                     claim,

@@ -608,6 +608,19 @@ class CurrentTaskEvidenceQualifier:
         ):
             return "HISTORICAL_REPORT"
 
+        # A dated numeric pytest result is a historical test report.
+        # This classifies the proposition, not its verification status.
+        if (
+            re.search(r"\bpytest\b", value, flags=re.IGNORECASE)
+            and re.search(r"\b\d{4}-\d{2}-\d{2}\b", value)
+            and re.search(
+                r"\b\d+\s+(?:tests?\s+)?passed\b",
+                value,
+                flags=re.IGNORECASE,
+            )
+        ):
+            return "HISTORICAL_REPORT"
+
         if self.contains_any(
             value,
             self.CONSTRAINT_MARKERS,
@@ -676,6 +689,29 @@ class CurrentTaskEvidenceQualifier:
                 evidence_anchors
             )
         ):
+            return "NON_QUALIFYING"
+
+        # For a progress request, "DIRECT" means directly relevant historical
+        # reporting. It must precede generic architecture/authority keywords in
+        # a multi-part diagnostic; it never implies current-state eligibility.
+        if item.get("question_intent") == "PROGRESS_HISTORY":
+            # The adapter supplies this after checking the actual source prose.
+            # A candidate's own status/subject fields cannot substitute for it.
+            if item.get("progress_source_bound") is False:
+                return "NON_QUALIFYING"
+            from .question_intent import classify_question_intent
+            from .progress_evidence import report_facets
+            from .request_interpretation import text_mentions_subject
+            intent = classify_question_intent(task)
+            bound = intent.topic and (
+                text_mentions_subject(evidence_text, intent.topic)
+                or str(item.get("source_subject") or "").casefold() == intent.topic.casefold())
+            if (bound and item.get("proposition_type") == "HISTORICAL_REPORT"
+                    and item.get("temporal_scope") == "HISTORICAL"
+                    and report_facets(evidence_text)):
+                return "DIRECT"
+            # A progress question cannot become current architecture proof just
+            # because its instructions mention workers, boundaries or status.
             return "NON_QUALIFYING"
 
         # ---------------------------------------------------------------------

@@ -1,4 +1,4 @@
-﻿"""
+"""
 PMEi GOVERNED WORKER EXECUTOR
 
 Purpose
@@ -54,6 +54,7 @@ from .output_validator import (
     WorkerOutputValidator,
     build_output_validator,
 )
+from .ollama_worker_transport import public_diagnostics
 from .providers import (
     BaseProvider,
     ProviderRequest,
@@ -68,6 +69,28 @@ from .worker_disposition import (
     EngineeringDispositionError,
     propose_engineering_disposition,
 )
+from .build_requirement import BUILD_REQUIREMENT_GUIDANCE
+from .worker_handoff import WorkerHandoffError, prepare_worker_handoff
+from .progress_report import CONTRACT as PROGRESS_REPORT_CONTRACT, ProgressReportContract, ProgressReportError
+from .engineering_work_product import (
+    CONTRACT as ENGINEERING_WORK_PRODUCT_CONTRACT,
+    EngineeringWorkProductContract,
+    EngineeringWorkProductError,
+)
+from .task_requirements import (
+    TASK_REASONING_CONTRACT, TaskRequirementsError, bind_task_requirements,
+)
+
+
+def _provider_telemetry(metadata):
+    """Provider telemetry cannot prepopulate executor-owned causal fields."""
+    reserved = {
+        "engineering_disposition", "engineering_build_requirement",
+        "engineering_disposition_error", "worker_handoff", "next_worker",
+        "build_required", "requires_human_approval", "promotion_authority",
+        "verification_authority", "progress_report", "task_requirements",
+    }
+    return {key: value for key, value in metadata.items() if key not in reserved} if isinstance(metadata, dict) else {}
 
 
 # =============================================================================
@@ -153,6 +176,61 @@ Do not turn recommendations into observations.
 Do not turn plausible behaviour into evidence.
 Do not fabricate telemetry, measurements, outcomes, or test results.
 
+HISTORICAL REPORT DISCIPLINE
+
+For a PROGRESS_HISTORY question, report relevant DIRECT historical
+evidence as attributed historical reports. Do not suppress it merely
+because it is HISTORICAL_CONTEXT_ONLY or SUPPORTED STATE is empty.
+
+Keep the historical limitation inside EACH claim. Use this form:
+"HISTORICAL REPORT ONLY: PMEi Record <ID> records a reported result: <verbatim complete sentence(s)>. This is not independently verified and is not evidence of current-job execution."
+
+The final disclaimer is a FIXED LITERAL STRING, not a sentence to rewrite:
+"This is not independently verified and is not evidence of current-job execution."
+Copy it character-for-character after EACH quoted historical outcome.
+In particular, the word is "job", NEVER "jet". Do not translate, paraphrase,
+spell-correct, abbreviate, or regenerate any part of that disclaimer.
+If you cannot reproduce the exact complete disclaimer, omit the historical
+report rather than emit an invalid or misleading report.
+
+Use the actual record ID and verbatim complete outcome sentences from
+that record's Recorded passage. Keep semicolon and contrastive limitations.
+Write each report as one paragraph; do not append new conclusions to it.
+If an event date is absent, omit the date. Only add "dated YYYY-MM-DD"
+before the colon when that event date appears in the quoted outcome.
+Do not copy the example placeholders into an answer.
+Do not invent an event date when only a record-save timestamp exists.
+Do not convert a historical report into a claim that the current job
+completed testing, implementation, verification or deployment.
+
+Preserve the exact authority label supplied by the worker packet.
+Never invent or rename authority classes.
+
+NON_QUALIFYING evidence is not an established achievement. Do not
+include it in a list of achieved progress. If no relevant DIRECT
+historical report exists, mark the requested progress UNVERIFIED.
+
+A historical report does not establish current implementation state,
+current-job execution, deployment, canonical status or human approval.
+State those limitations separately as well.
+
+PROGRESS SUMMARY TEMPORAL BOUNDARY
+
+When summarising progress, preserve each report's record ID and historical
+scope in EVERY sentence that mentions an installation, test or deployment.
+Do not turn a historical report into a present-tense installation status,
+including in a numbered dependency list or a final summary paragraph.
+Do not repeat an older record's "not installed" statement as the current
+state. If later installation evidence is absent from BOUNDED CONTEXT,
+state "Current installation state is UNVERIFIED from the supplied evidence."
+If later evidence is present, report the earlier and later events separately
+with their respective provenance; do not infer a current state from either.
+A report about fix v1 is not evidence about fix v2. Do not collapse versions.
+For progress/dependency ordering, use historical attribution for each step;
+label inferred dependencies INFERENCE and unproved layers UNVERIFIED.
+Do not append an unbounded freeform synthesis after the attributed reports.
+Do not claim current-job tests, implementation, deployment or approval unless
+explicitly supported by current-job evidence in the governed worker packet.
 Your output must describe only the work product available from the
 supplied evidence.
 """.strip()
@@ -161,6 +239,52 @@ supplied evidence.
 # =============================================================================
 # WORKER PROMPTS
 # =============================================================================
+
+ENGINEERING_DELIVERABLE_CONTRACT = """
+TASK DELIVERABLE
+Deliver the requested plan, comparison, assessment or implementation requirement.
+In ENGINEERING ANALYSIS give ordered steps/options, decision points and stop
+conditions. Distinguish user reports, attributed sources and INFERENCE. Preserve
+event time. Missing measurements allow a conditional plan, not certification.
+Separate user observations from competent assessment or testing. Assess source
+relevance; anecdotes are not verified procedures. Identify conflicting advice and
+needed evidence. Explain trade-offs and what checks can establish; do not invent
+prices, measurements, results or completed work. Apply relevant governed learning
+without granting it authority. A real-world plan is a valid candidate deliverable;
+physical work is not itself authorisation for a software build.
+
+ACTION-LEVEL EVIDENCE BOUNDARY
+In ENGINEERING ANALYSIS, every numbered action, bullet, decision, warning,
+and stop condition that is not directly established by the governed packet
+MUST start with the literal prefix "INFERENCE:" or "UNVERIFIED:".
+For numbered actions, use "INFERENCE: 1. ..." rather than "1. ...".
+Do not put unlabelled recommendations under an alternative heading:
+keep the requested plan inside ENGINEERING ANALYSIS. Never use a blanket
+label for a paragraph to cover subsequent unlabelled steps. If the packet
+cannot justify a specific procedure, state UNVERIFIED and request competent
+assessment instead of inventing precise quantities, methods or outcomes.
+
+""".strip()
+
+
+def engineering_response_contract(provider):
+    """A planning target, not permission to accept truncated or unchecked output."""
+    limit = getattr(provider, "num_predict", None)
+    target = min(900, max(1, limit // 2)) if type(limit) is int and limit > 0 else 768
+    return f"""CONCISE COMPLETE DELIVERABLE
+Aim for at most {target} output tokens; finish all required sections before the cap.
+SUPPORTED EVIDENCE: at most two short attributed bullets, or one gap line. Do not
+repeat the task, permissions or evidence packet. Spend most space on ENGINEERING
+ANALYSIS: the requested plan or code with compact proposed tests. Keep INFERENCE
+labels and essential safety/stop conditions. State limitations once in UNVERIFIED;
+keep BUILDER REQUIREMENT and disposition brief. If scope exceeds this space,
+provide a bounded complete result and identify unresolved work explicitly.
+For code, mentally trace normal/empty/invalid inputs, iterator consumption, returns
+and exceptions; correct contradictions with expected results. This is not execution
+or independent verification: tests remain proposed and unrun. Keep all authority
+and evidence boundaries."""
+
+
 
 WEB_LOOKUP_ENGINEERING_PROMPT = f"""
 You are the Engineering worker answering an external-world question.
@@ -483,6 +607,10 @@ Return only evidence-bounded Steward work product.
 """.strip(),
 }
 
+# One shared scope rule applies to PMEi and external-source Engineering.
+WEB_LOOKUP_ENGINEERING_PROMPT += "\n\n" + BUILD_REQUIREMENT_GUIDANCE
+WORKER_SYSTEM_PROMPTS["engineering"] += "\n\n" + BUILD_REQUIREMENT_GUIDANCE
+
 
 # =============================================================================
 # EXECUTOR
@@ -554,14 +682,20 @@ class WorkerExecutor:
             worker_role == "engineering"
             and source_route == WEB_LOOKUP
         ):
-            return WEB_LOOKUP_ENGINEERING_PROMPT
+            return (WEB_LOOKUP_ENGINEERING_PROMPT + "\n\n" + TASK_REASONING_CONTRACT
+                    + "\n\n" + ENGINEERING_DELIVERABLE_CONTRACT
+                    + "\n\n" + engineering_response_contract(getattr(self, "provider", None)))
 
         prompt = WORKER_SYSTEM_PROMPTS.get(
             worker_role
         )
 
         if prompt:
-            return prompt
+            if worker_role == "engineering":
+                return (prompt + "\n\n" + TASK_REASONING_CONTRACT
+                        + "\n\n" + ENGINEERING_DELIVERABLE_CONTRACT
+                        + "\n\n" + engineering_response_contract(getattr(self, "provider", None)))
+            return prompt + "\n\n" + TASK_REASONING_CONTRACT
 
         return f"""
 You are the {worker_role} worker inside a governed PMEi orchestration system.
@@ -574,6 +708,8 @@ Do not write PMEi continuity.
 Do not mutate orchestration state.
 
 {COMMON_EVIDENCE_CONTRACT}
+
+{TASK_REASONING_CONTRACT}
 
 Return only the evidence-bounded work product for your active worker role.
 """.strip()
@@ -892,6 +1028,35 @@ Return only the evidence-bounded work product for your active worker role.
         if worker.worker_id != active_worker:
             raise NoActiveWorkerError("worker_identity_mismatch")
 
+        try:
+            task_requirements = bind_task_requirements(
+                job_id=state.job.job_id, worker_role=active_worker,
+                constraints=state.job.constraints,
+            )
+        except TaskRequirementsError as exc:
+            return WorkerExecution(
+                job_id=job_id, worker_role=active_worker, ok=False,
+                provider=getattr(self.provider, "provider_name", "unknown"),
+                model=model, output_text="", error="Task requirements blocked: " + str(exc),
+                metadata={
+                    "validation_status": "REJECT", "validation_issue_count": 1,
+                    "validation_issues": [{"rule_id": "TASK_REQUIREMENTS_INVALID",
+                        "severity": "ERROR", "claim": "Recorded job constraints", "reason": str(exc)}],
+                    "orchestration_state_changed": False, "transition_authority": False,
+                },
+            )
+
+        try:
+            worker_handoff = prepare_worker_handoff(state)
+        except WorkerHandoffError as exc:
+            return WorkerExecution(
+                job_id=job_id, worker_role=active_worker, ok=False,
+                provider=getattr(self.provider, "provider_name", "unknown"),
+                model=model, output_text="", error="Worker handoff blocked: " + str(exc),
+                metadata={"validation_status": "BLOCKED", "handoff_status": "BLOCKED",
+                          "orchestration_state_changed": False, "transition_authority": False},
+            )
+
         # Bound from the existing engine registry, never from task/evidence text.
         # These describe the active worker; runtime gates still own permissions.
         worker_identity = {
@@ -1055,15 +1220,40 @@ Return only the evidence-bounded work product for your active worker role.
         }
 
         context["worker_identity"] = worker_identity
+        context["task_requirements"] = task_requirements
+        if worker_handoff is not None:
+            context["worker_handoff"] = worker_handoff
+
+        progress_contract = ProgressReportContract.for_packet(active_worker, worker_packet)
+        engineering_contract = EngineeringWorkProductContract.for_packet(active_worker, worker_packet)
+        system_prompt = self.system_prompt_for_worker(active_worker, source_route=source_route)
+        if progress_contract is not None:
+            # Keep the registered role, permission limits and same evidence/learning
+            # packet. Replace only the prose output instructions for this operation.
+            evidence_rules = COMMON_EVIDENCE_CONTRACT.split("HISTORICAL REPORT DISCIPLINE", 1)[0]
+            system_prompt = system_prompt.replace(
+                COMMON_EVIDENCE_CONTRACT, evidence_rules + progress_contract.prompt(),
+            )
+        elif engineering_contract is not None:
+            # Keep the existing Engineering evidence, task and authority contracts.
+            # Structured generation changes representation only; PMEi owns rendering.
+            system_prompt = (
+                system_prompt + "\n\n" + engineering_contract.prompt()
+            )
 
         provider_request = ProviderRequest(
             worker_role=active_worker,
 
             task=state.job.task,
 
-            system_prompt=identity_contract + self.system_prompt_for_worker(
-                active_worker,
-                source_route=source_route,
+            system_prompt=identity_contract + system_prompt,
+
+            output_schema=(
+                progress_contract.schema()
+                if progress_contract is not None
+                else engineering_contract.schema()
+                if engineering_contract is not None
+                else None
             ),
 
             context=context,
@@ -1073,6 +1263,7 @@ Return only the evidence-bounded work product for your active worker role.
             temperature=temperature,
 
             metadata={
+                "worker_work_product": True,
                 "job_id":
                     job_id,
 
@@ -1141,6 +1332,8 @@ Return only the evidence-bounded work product for your active worker role.
                 ),
 
                 metadata={
+                    "provider_diagnostics": public_diagnostics(
+                        getattr(exc, "provider_diagnostics", None)),
                     "orchestration_state_changed":
                         False,
 
@@ -1176,9 +1369,85 @@ Return only the evidence-bounded work product for your active worker role.
                         ),
                 },
             )
+        work_output = response.output_text
+        progress_metadata = {}
+        if progress_contract is not None:
+            audit = {"contract": PROGRESS_REPORT_CONTRACT,
+                     "raw_provider_output": response.output_text,
+                     "qualified_record_ids": list(progress_contract.passages),
+                     "status": "REJECTED"}
+            try:
+                work_output, selection = progress_contract.render(
+                    response.output_text, ok=response.ok, metadata=response.metadata,
+                )
+            except ProgressReportError as exc:
+                audit["error"] = str(exc)
+                return WorkerExecution(
+                    job_id=job_id, worker_role=active_worker, ok=False,
+                    provider=response.provider, model=response.model,
+                    output_text=response.output_text,
+                    error="Structured historical Findings rejected: " + str(exc),
+                    metadata={
+                        **_provider_telemetry(response.metadata),
+                        "progress_report": audit,
+                        "validation_status": "REJECT", "validation_issue_count": 1,
+                        "validation_issues": [{"rule_id": "PROGRESS_REPORT_CONTRACT_INVALID",
+                            "severity": "ERROR", "claim": "Structured historical Findings response",
+                            "reason": str(exc)}],
+                        "orchestration_state_changed": False, "transition_authority": False,
+                        "evidence_bounded": True,
+                    },
+                )
+            audit.update(status="RENDERED", selection=selection)
+            progress_metadata["progress_report"] = audit
+
+        if engineering_contract is not None:
+            audit = {
+                "contract": ENGINEERING_WORK_PRODUCT_CONTRACT,
+                "raw_provider_output": response.output_text,
+                "status": "REJECTED",
+            }
+            try:
+                work_output, selection = engineering_contract.render(
+                    response.output_text,
+                    ok=response.ok,
+                    metadata=response.metadata,
+                )
+            except EngineeringWorkProductError as exc:
+                audit["error"] = str(exc)
+                return WorkerExecution(
+                    job_id=job_id,
+                    worker_role=active_worker,
+                    ok=False,
+                    output_text=response.output_text,
+                    error=(
+                        "Structured Engineering work product rejected: " + str(exc)
+                    ),
+                    metadata={
+                        **_provider_telemetry(response.metadata),
+                        "engineering_work_product": audit,
+                        "validation_status": "REJECT",
+                        "validation_issue_count": 1,
+                        "validation_issues": [
+                            {
+                                "rule_id": "ENGINEERING_WORK_PRODUCT_CONTRACT_INVALID",
+                                "message": str(exc),
+                            }
+                        ],
+                        "orchestration_state_changed": False,
+                        "transition_authority": False,
+                        "evidence_bounded": True,
+                    },
+                )
+            audit.update(status="RENDERED", selection=selection)
+            progress_metadata["engineering_work_product"] = audit
+
         validation = self.output_validator.validate(
-            output_text=response.output_text,
+            output_text=work_output,
             worker_packet_text=worker_packet.rendered_text,
+            task_requirements=task_requirements,
+            expected_job_id=job_id,
+            expected_worker=active_worker,
         )
 
         if not validation.ok:
@@ -1188,13 +1457,14 @@ Return only the evidence-bounded work product for your active worker role.
                 ok=False,
                 provider=response.provider,
                 model=response.model,
-                output_text=response.output_text,
+                output_text=work_output,
                 error=(
                     "Deterministic worker output validation rejected "
                     "the provider work product."
                 ),
                 metadata={
-                    **response.metadata,
+                    **_provider_telemetry(response.metadata),
+                    **progress_metadata,
                     "validation_status": validation.status,
                     "validation_issue_count": len(validation.issues),
                     "validation_issues": [
@@ -1240,8 +1510,9 @@ Return only the evidence-bounded work product for your active worker role.
                 engineering_disposition = (
                     propose_engineering_disposition(
                         self.provider,
-                        response.output_text,
+                        work_output,
                         model=response.model or model,
+                        original_task=state.job.task,
                     )
                 )
 
@@ -1252,6 +1523,10 @@ Return only the evidence-bounded work product for your active worker role.
                             engineering_disposition.build_required,
                     },
                 }
+                if engineering_disposition.build_required:
+                    engineering_disposition_metadata["engineering_build_requirement"] = (
+                        engineering_disposition.build_requirement
+                    )
 
             except EngineeringDispositionError:
                 # Accepted Engineering work remains candidate-only.
@@ -1269,12 +1544,13 @@ Return only the evidence-bounded work product for your active worker role.
 
             model=response.model,
 
-            output_text=response.output_text,
+            output_text=work_output,
 
             error=response.error,
 
             metadata={
-                **response.metadata,
+                **_provider_telemetry(response.metadata),
+                **progress_metadata,
                 **engineering_disposition_metadata,
 
                 "validation_status": validation.status,
@@ -1324,8 +1600,6 @@ Return only the evidence-bounded work product for your active worker role.
                     ),
             },
         )
-
-
 
 
 

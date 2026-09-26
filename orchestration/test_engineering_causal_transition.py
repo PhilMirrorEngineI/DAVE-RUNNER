@@ -16,6 +16,7 @@ from pathlib import Path
 from orchestration.contracts import OrchestrationJob
 from orchestration.engine import OrchestrationEngine
 from orchestration.executor import WorkerExecution
+from orchestration.test_build_requirement import valid_requirement
 from orchestration.store import JsonOrchestrationStore
 from orchestration.transitions import HUMAN_GATE
 from orchestration.worker_disposition import (
@@ -57,6 +58,7 @@ def make_result(job_id, output_text):
         metadata={
             "validation_status": "ACCEPT",
             "transition_authority": False,
+            "engineering_build_requirement": valid_requirement(),
         },
     )
 

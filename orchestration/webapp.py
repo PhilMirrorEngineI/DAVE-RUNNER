@@ -17,6 +17,7 @@ import requests
 from flask import Flask, redirect, render_template_string, request, url_for
 
 from orchestration.contracts import OrchestrationJob
+from orchestration.task_requirement_recorder import record_task_requirements
 from orchestration.engine import OrchestrationEngine
 from orchestration.workers import get_worker
 from orchestration.executor import WorkerExecutor
@@ -280,6 +281,35 @@ PAGE = r"""<!doctype html>
 .eng-send-btn.working::after{content:"  ?"}
 .eng-send-btn.result::after{content:"  ?"}
 .eng-send-btn.blocked::after{content:"  !"}
+
+
+/* PMEI_PORT_WORKFLOW_STUDIO_UI_V1 — presentation only */
+:root{--bg:#060f20;--panel:#0b1930;--line:#234365;--blue:#58b8ff;--text:#eaf5ff}
+body{background:radial-gradient(ellipse at 50% 0%,#102c50 0%,#071429 55%,#050e1d 100%)}
+.topbar{background:#071427!important;border-bottom-color:#23466c!important}
+.shell{grid-template-columns:185px minmax(0,1fr)!important}
+.nav{background:#08162a!important}
+.workspace{display:grid!important;grid-template-columns:minmax(0,1fr) 355px!important;grid-template-rows:minmax(450px,1fr) auto!important;gap:12px!important;padding:12px!important}
+.foh-main{grid-column:2;grid-row:1;min-height:0!important;max-height:calc(100vh - 160px);border-color:#29547b;background:#0a1a31}
+.foh-head{flex-wrap:wrap}.foh-title{font-size:17px!important}.foh-head .avatar{width:38px!important;height:38px!important}
+.chat-scroll{min-height:220px!important}.chat-compose{grid-template-columns:1fr auto auto!important}
+.worker-column{grid-column:1;grid-row:1;display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:min-content;align-content:start;gap:9px!important;border:1px solid #254766;border-radius:14px;padding:15px;background:radial-gradient(circle at 50% 40%,#12355a 0%,#09192f 60%,#081529 100%);position:relative}
+.worker-heading{grid-column:1/-1;padding:4px 0 12px!important;border-bottom:1px solid #24435d;margin-bottom:5px}.worker-heading h2{font-size:18px!important;letter-spacing:.09em}.worker-heading span{font-size:12px}
+.worker-card{min-height:88px!important;background:#0b203a!important;border:1px solid #295276!important;cursor:pointer;border-radius:12px!important;padding:10px!important}
+.worker-card:hover,.worker-card.port-selected{border-color:#62c6ff!important;box-shadow:0 0 0 1px #337ba5,0 0 22px #1167a244;transform:none!important}
+.worker-card .avatar{display:none!important}.worker-card{grid-template-columns:minmax(0,1fr) auto!important}.worker-card>div:nth-child(2){grid-column:1}.worker-card .state{grid-column:2;grid-row:1}.worker-card .worker-open{grid-column:1/-1;justify-self:start}
+.worker-name{font-size:13px!important;color:#dff4ff}.worker-desc{font-size:11px!important}
+.activity{grid-column:1/-1!important;grid-row:2;min-height:78px;border-color:#254c71;background:#091a30}
+.port-heading{grid-column:1/-1;text-align:center;margin:10px 0 2px;color:#cbeaff;font-size:12px;letter-spacing:.2em}
+.port-hub{grid-column:1/-1;justify-self:center;border:2px solid #49bfff;background:radial-gradient(circle,#1b5e92,#0c2847 72%);color:white;border-radius:100%;width:145px;height:145px;box-shadow:0 0 32px #2fafff55;font-weight:800;letter-spacing:.08em;font-size:17px;cursor:pointer;margin:8px 0;position:relative}
+.port-hub small{display:block;color:#9adcf9;font-size:10px;margin-top:7px;font-weight:500}
+.port-inspector{grid-column:1/-1;border:1px solid #2c5c7f;background:#0b1d35;border-radius:11px;padding:12px;min-height:120px}
+.port-inspector h3{font-size:14px;letter-spacing:.08em;margin:0 0 6px;color:#78cfff}.port-inspector p{font-size:12px;line-height:1.45;color:#b9cfe2;margin:5px 0}
+.port-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.port-actions button{background:#103757;border:1px solid #367eac;border-radius:7px;color:#e3f5ff;padding:8px 12px;font-size:12px}.port-actions button:disabled{opacity:.5;cursor:not-allowed}
+.port-output{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font-size:12px;color:#d9ebf9;margin-top:9px}
+.port-activity{grid-column:1/-1;font-size:11px;color:#aac6d8;padding:8px;border-top:1px solid #21415d}
+@media(max-width:1100px){.workspace{grid-template-columns:1fr!important}.worker-column{grid-column:1;grid-row:1}.foh-main{grid-column:1;grid-row:2;max-height:none}.activity{grid-row:3}.shell{grid-template-columns:65px minmax(0,1fr)!important}}
+@media(max-width:650px){.shell{display:block!important}.worker-column{grid-template-columns:1fr 1fr!important}.port-hub{width:110px;height:110px}.worker-card{grid-template-columns:1fr!important}.worker-card .state{grid-column:1;grid-row:auto}.chat-compose{grid-template-columns:1fr auto!important}.chat-compose textarea{grid-column:1/-1}}
 
 </style>
 </head>
@@ -601,8 +631,83 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeWorker()});docu
   setInterval(refreshEngineeringStatus, 1500);
 })();
 
+
+// PMEI_PORT_WORKFLOW_STUDIO_UI_V1: no backend authority or routing changes.
+(function(){
+ const eligible=new Set(['architecture','engineering','findings','governance','steward']);
+ const display=['architecture','engineering','findings','governance','steward','builder','knobhead'];
+ const titles={architecture:'ARCHITECTURE DAVE',engineering:'ENGINEERING DAVE',findings:'FINDINGS DAVE',governance:'GOVERNANCE DAVE',steward:'STEWARD DAVE',builder:'BUILDER DAVE',knobhead:'KNOBHEAD DAVE'};
+ const column=document.querySelector('.worker-column');
+ if(!column)return;
+ const heading=column.querySelector('.worker-heading');
+ if(heading){heading.querySelector('h2').textContent='WORKFLOW STUDIO';heading.querySelector('span').textContent='SELECT A WORKER';}
+ const intro=document.createElement('div');intro.className='port-heading';intro.textContent='PMEi  /  GOVERNED ORCHESTRATION';
+ if(heading)heading.after(intro);
+ const hub=document.createElement('button');hub.type='button';hub.className='port-hub';hub.innerHTML='FOH DAVE<small>RETURN TO CHAT</small>';
+ hub.onclick=()=>{select(null);document.getElementById('chatInput').focus();};intro.after(hub);
+ const inspector=document.createElement('section');inspector.className='port-inspector';inspector.setAttribute('aria-live','polite');column.appendChild(inspector);
+ const activity=document.createElement('div');activity.className='port-activity';activity.textContent='No worker selected. Select a worker or return to FOH.';column.appendChild(activity);
+ let current=null,detail=null,busy=false;const outputs={};
+ function button(label,fn,disabled){const b=document.createElement('button');b.type='button';b.textContent=label;b.disabled=!!disabled;b.onclick=fn;return b;}
+ function putLine(parent,tag,value){const e=document.createElement(tag);e.textContent=value;parent.appendChild(e);return e;}
+ function select(key){
+   current=key;detail=null;
+   column.querySelectorAll('.worker-card').forEach(c=>c.classList.toggle('port-selected',c.dataset.worker===key));
+   render();
+   if(!key)return;
+   fetch('/workers/'+encodeURIComponent(key),{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('Worker manifest unavailable');return r.json();}).then(d=>{if(current!==key)return;detail=d.ok?d:null;render();}).catch(()=>{if(current===key){detail=null;render();}});
+ }
+ function render(){
+   inspector.replaceChildren();
+   putLine(inspector,'h3',current?(titles[current]||current.toUpperCase()):'FRONT-OF-HOUSE DAVE');
+   if(!current){putLine(inspector,'p','Persistent FOH conversation. PMEi continuity remains read-only. Select a worker to inspect its available actions.');const a=document.createElement('div');a.className='port-actions';a.appendChild(button('FOCUS FOH',()=>document.getElementById('chatInput').focus()));inspector.appendChild(a);return;}
+   const worker=detail&&detail.worker;
+   putLine(inspector,'p',worker?(worker.function||'No function established'):'Loading worker manifest / not verified');
+   putLine(inspector,'p','Direct worker conversation: not connected. Worker request: '+(eligible.has(current)?'governed route available':'governed transition required')+'.');
+   const actions=document.createElement('div');actions.className='port-actions';inspector.appendChild(actions);
+   actions.appendChild(button('PROFILE',()=>openWorker(current,'profile')));
+   actions.appendChild(button('ACTIVITY',()=>openWorker(current,'activity')));
+   actions.appendChild(button('CHAT VIA FOH',()=>{const box=document.getElementById('chatInput');box.value='I want to discuss a request for '+titles[current]+'. '+box.value;box.focus();}));
+   if(eligible.has(current))actions.appendChild(button('ENGAGE (REQUEST)',()=>engage(current),busy));
+   else actions.appendChild(button('TRANSITION REQUIRED',()=>{},true));
+   actions.appendChild(button('RETURN TO FOH',()=>select(null)));
+   if(outputs[current]){const output=document.createElement('div');output.className='port-output';output.textContent=outputs[current];inspector.appendChild(output);}
+ }
+ async function engage(key){
+   if(busy||!eligible.has(key))return;
+   const box=document.getElementById('chatInput');const task=String(box.value||lastPhilMessage||'').trim();
+   if(!task){activity.textContent='Type a bounded task in FOH first; no job started.';box.focus();return;}
+   if(!window.confirm('Submit this bounded request to '+titles[key]+'?\n\n'+task.slice(0,450)))return;
+   busy=true;render();activity.textContent='Submitting governed request to '+titles[key]+'...';
+   try{
+     const response=await fetch('/orchestration/request-worker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task,requested_worker:key})});
+     const d=await response.json();
+     if(!response.ok||!d.ok){activity.textContent='Request not accepted: '+String(d.error||response.status);return;}
+     const e=d.execution||{};
+     activity.textContent='Job '+String(d.job_id||'unknown')+' | '+key+' | '+String(e.validation||'UNVERIFIED')+' | '+(e.ok?'execution returned':'execution failed')+' | request only';
+     outputs[key]='Job '+String(d.job_id||'unknown')+' | '+String(e.validation||'UNVERIFIED')+' | '+String(d.authority||'request_only')+'\n\n'+String(e.output||'(no output)');
+   }catch(err){activity.textContent='Worker request failed: '+String(err);}
+   finally{busy=false;render();}
+ }
+ // Replace only the inert cards' presentation; existing modal and Engineering controls stay intact.
+ for(const key of display){
+   let card=column.querySelector('.worker-card[data-worker="'+key+'"]');
+   if(!card){card=document.createElement('div');card.className='worker-card '+key;card.dataset.worker=key;putLine(card,'div',titles[key]);column.insertBefore(card,inspector);}
+   card.addEventListener('click',e=>{if(e.target.closest('button'))return;select(key);});
+   const open=card.querySelector('.worker-open');if(open)open.textContent='INSPECT';
+ }
+ select(null);
+ fetch('/chat/status',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+   const pill=document.getElementById('chatStatus');if(pill)pill.textContent=(d.connected?'OLLAMA CONNECTED':'OLLAMA OFFLINE')+' / '+(d.pmei_read_connected?'PMEi CONFIGURED':'PMEi NOT CONFIGURED');
+ }).catch(()=>{});
+})();
+
 </script></body></html>
 """
+
+from orchestration.cockpit_polling import connect_chat_polling
+PAGE = connect_chat_polling(PAGE)
+
 
 
 @app.get("/")
@@ -1247,140 +1352,57 @@ def cockpit_worker(worker_name):
 # PMEI_ENGINEERING_HANDOFF_V1
 @app.post("/orchestration/request-worker")
 def request_governed_start_worker():
+    from orchestration.automatic_continuation import AutomaticContinuation
+
     payload = request.get_json(silent=True) or {}
-
     task = str(payload.get("task") or "").strip()
-    requested_worker = str(
-        payload.get("requested_worker") or ""
-    ).strip().lower()
-
+    requested_worker = str(payload.get("requested_worker") or "").strip().lower()
     if not task:
-        return {
-            "ok": False,
-            "error": "task_required",
-            "transition_authority": False,
-        }, 400
-
+        return {"ok": False, "error": "task_required", "transition_authority": False}, 400
     if not requested_worker:
-        return {
-            "ok": False,
-            "error": "requested_worker_required",
-            "transition_authority": False,
-        }, 400
-
+        return {"ok": False, "error": "requested_worker_required", "transition_authority": False}, 400
     try:
         get_worker(requested_worker)
     except ValueError as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "transition_authority": False,
-        }, 400
+        return {"ok": False, "error": str(exc), "transition_authority": False}, 400
+    if requested_worker not in {"architecture", "engineering", "governance", "findings", "steward"}:
+        return {"ok": False, "error": "worker_requires_governed_transition",
+                "requested_worker": requested_worker, "transition_authority": False}, 400
 
-    initial_workers = {
-        "architecture",
-        "engineering",
-        "governance",
-        "findings",
-        "steward",
-    }
-
-    if requested_worker not in initial_workers:
-        return {
-            "ok": False,
-            "error": "worker_requires_governed_transition",
-            "requested_worker": requested_worker,
-            "transition_authority": False,
-        }, 400
-
+    constraints = record_task_requirements(task)
     foh_context = _foh_pmei_prepare_for_question(task)
-
-    job = OrchestrationJob(
-        job_id="web-" + uuid.uuid4().hex[:12],
-        task=task,
-        requested_worker=requested_worker,
-        context={
-            "foh_context": foh_context,
-        },
-    )
-
+    job = OrchestrationJob(job_id="web-" + uuid.uuid4().hex[:12], task=task,
+                           requested_worker=requested_worker, context={"foh_context": foh_context}, constraints=constraints)
     engine.create_job(job)
-    execution = executor.execute(job.job_id)
+    try:
+        report = AutomaticContinuation(engine, executor).start(job.job_id)
+    except Exception as exc:
+        return {"ok": False, "job_id": job.job_id, "requested_worker": requested_worker,
+                "error": "Automatic job start failed; inspect job state before retrying.",
+                "error_type": type(exc).__name__, "authority": "request_only",
+                "transition_authority": False, "promotion_authority": False,
+                "verification_authority": False,
+                "status_url": "/orchestration/jobs/" + job.job_id}, 503
+    report["status_url"] = "/orchestration/jobs/" + job.job_id
+    return report, 202 if report.get("ok") else 503
 
-    execution_meta = execution.metadata or {}
 
-    # PMEI_GOVERNED_CAUSAL_CONTINUATION_V1
-    #
-    # WorkerExecution remains candidate inference only.
-    # Validator ACCEPT alone does not establish a causal result.
-    # A valid Engineering-owned disposition is required before
-    # the existing orchestration engine may consume WorkerResult.
-    if (
-        requested_worker == "engineering"
-        and execution.ok is True
-        and execution_meta.get("validation_status") == "ACCEPT"
-    ):
-        try:
-            engineering_disposition = parse_engineering_disposition(
-                execution.output_text
-            )
+@app.get("/orchestration/jobs/<job_id>")
+def orchestration_job_status(job_id):
+    import re
+    from orchestration.automatic_continuation import read_report
+    from orchestration.store import OrchestrationRecordNotFound, OrchestrationStoreError
 
-            worker_result = WorkerResultBridge().from_execution(
-                execution,
-                GovernedDisposition(
-                    result_type="ENGINEERING_RESULT",
-                    status=engineering_disposition.status,
-                    responsible_layer="engineering",
-                    build_required=engineering_disposition.build_required,
-                ),
-            )
-
-            # Successor selection remains solely with the existing
-            # deterministic orchestration engine.
-            engine.submit_result(worker_result)
-
-        except (
-            EngineeringDispositionError,
-            UnresolvedWorkerResult,
-        ):
-            # Missing/invalid disposition preserves candidate-only
-            # behaviour. No causal WorkerResult is manufactured.
-            pass
-
-    return {
-        "ok": True,
-        "job_id": job.job_id,
-        "requested_worker": requested_worker,
-        "authority": "request_only",
-        "transition_authority": False,
-        "execution": {
-            "ok": execution.ok,
-            "provider": execution.provider,
-            "model": execution.model,
-            "validation": execution_meta.get("validation_status"),
-            "done_reason": execution_meta.get("done_reason"),
-            "num_predict": execution_meta.get("num_predict"),
-            "prompt_eval_count": execution_meta.get("prompt_eval_count"),
-            "eval_count": execution_meta.get("eval_count"),
-            "validation_issue_count": execution_meta.get(
-                "validation_issue_count",
-                0,
-            ),
-            "validation_issues": execution_meta.get(
-                "validation_issues",
-                [],
-            ),
-            "transition_authority": execution_meta.get(
-                "transition_authority",
-                False,
-            ),
-            "output": (
-                execution.output_text
-                or execution.error
-                or "(no output)"
-            ),
-        },
-    }, 202
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", job_id):
+        return {"ok": False, "error": "invalid_job_id", "transition_authority": False}, 400
+    try:
+        report = read_report(engine, job_id)
+    except OrchestrationRecordNotFound:
+        return {"ok": False, "error": "job_not_found", "transition_authority": False}, 404
+    except (OrchestrationStoreError, ValueError, KeyError, TypeError):
+        return {"ok": False, "error": "job_state_unavailable", "transition_authority": False}, 503
+    report["status_url"] = "/orchestration/jobs/" + job_id
+    return report, 200
 
 
 @app.post("/orchestration/request-engineering")
@@ -2005,74 +2027,43 @@ def local_chat_status():
 
 # PMEI_LOCAL_OLLAMA_CHAT_V1
 def _foh_request_initial_worker(task, requested_worker, selection):
-    """Reuse the frozen generic start view using the existing cockpit pattern.
+    """Request one automatically continued job through the existing start gate.
 
-    No HTTP loopback call and no transition/result-submission path is introduced.
-    The task remains the original user message; the proposal cannot replace it.
+    FOH preserves the user's task and initial selector outcome. The engine
+    governs successors; polling the returned URL has no execution authority.
     """
     endpoint = next((rule.endpoint for rule in app.url_map.iter_rules()
         if rule.rule == "/orchestration/request-worker" and "POST" in rule.methods), None)
     view = app.view_functions.get(endpoint) if endpoint else None
     if view is None:
-        return {
-            "ok": False,
-            "error": "Existing governed worker-start route is unavailable. No job was started.",
-            "authority": "request_only", "transition_authority": False,
-        }, 503
-
-    add_live_event("HANDOFF", "FOH requested an initial worker",
+        return {"ok": False, "error": "Existing governed worker-start route is unavailable. No job was started.",
+                "authority": "request_only", "transition_authority": False}, 503
+    add_live_event("HANDOFF", "FOH requested an automatic governed job",
         requested_worker=requested_worker, authority="request_only", transition_authority=False)
     try:
         with app.test_request_context("/orchestration/request-worker", method="POST",
-            json={"task": task, "requested_worker": requested_worker}):
+                                     json={"task": task, "requested_worker": requested_worker}):
             response = app.make_response(view())
             body = response.get_json(silent=True)
             status_code = response.status_code
     except Exception as exc:
-        add_live_event("HANDOFF", "Initial worker request did not return a result",
-            requested_worker=requested_worker, error_type=type(exc).__name__)
-        return {
-            "ok": False,
-            "error": "The worker request did not return a result. Check job state before retrying.",
-            "initial_request": selection,
-            "authority": "request_only", "transition_authority": False,
-        }, 502
+        add_live_event("HANDOFF", "Automatic job request did not return a status",
+                      requested_worker=requested_worker, error_type=type(exc).__name__)
+        return {"ok": False, "error": "The request did not return a job status. Check existing jobs before retrying.",
+                "initial_request": selection, "authority": "request_only", "transition_authority": False}, 502
     if not isinstance(body, dict):
         return {"ok": False, "error": "Invalid response from the governed start route.",
-            "authority": "request_only", "transition_authority": False}, 502
+                "authority": "request_only", "transition_authority": False}, 502
     if status_code >= 400 or not body.get("ok"):
         return {**body, "ok": False, "initial_request": selection}, status_code if status_code >= 400 else 502
-
-    execution = body.get("execution") or {}
-    if not isinstance(execution, dict) or not body.get("job_id") or body.get("requested_worker") != requested_worker:
-        return {"ok": False, "error": "Governed start returned an invalid worker result.",
-            "authority": "request_only", "transition_authority": False}, 502
-    accepted = execution.get("ok") is True and execution.get("validation") == "ACCEPT"
-    result = {
-        **body,
-        "ok": accepted,
-        "initial_request": selection,
-        "output_owner": requested_worker,
-        "result_status": "CANDIDATE_RETURNED" if accepted else "WORKER_RESULT_REJECTED",
-        "validation_status": execution.get("validation"),
-        "provider": execution.get("provider"),
-        "model": execution.get("model"),
-        "authority": "request_only",
-        "promotion_authority": False,
-        "verification_authority": False,
-        "transition_authority": False,
-    }
-    add_live_event("HANDOFF", "Initial worker returned candidate work" if accepted else "Initial worker result rejected",
-        job_id=body["job_id"], requested_worker=requested_worker,
-        validation=execution.get("validation"), authority="request_only", transition_authority=False)
-    if not accepted:
-        result["error"] = "The worker did not return an accepted candidate. The job has not advanced."
-        return result, 422
-    result["text"] = (
-        f"{get_worker(requested_worker).title} returned candidate work for review.\n\n"
-        + str(execution.get("output") or "")
-    )
-    return result, 200
+    if not body.get("job_id") or body.get("requested_worker") != requested_worker:
+        return {"ok": False, "error": "Governed start returned an invalid job identity.",
+                "authority": "request_only", "transition_authority": False}, 502
+    result = {**body, "initial_request": selection, "authority": "request_only",
+              "promotion_authority": False, "verification_authority": False, "transition_authority": False}
+    result["text"] = ("Dave accepted job " + body["job_id"] + ". Automatic governed work is queued. "
+                      "Read status_url for progress and candidate results. No completion or approval is claimed.")
+    return result, 202
 
 
 @app.post("/chat")
@@ -2133,6 +2124,58 @@ def local_ollama_chat():
     # Bounded initial request proposal. The existing governed endpoint remains
     # responsible for validating the requested role, creating and executing jobs.
     # Worker results remain candidates; no WorkerResult is submitted here.
+    # Return-side binding for a job previously started by this FOH conversation.
+    # Read-only delivery only: no resume, approval, successor selection, or mutation.
+    import re
+    prior_job_id = None
+    for item in reversed(history):
+        if item.get("role") != "assistant":
+            continue
+        match = re.fullmatch(
+            r"Dave accepted job ([A-Za-z0-9_-]{1,96})\. Automatic governed work is queued\. "
+            r"Read status_url for progress and candidate results\. No completion or approval is claimed\.",
+            item.get("content", ""),
+        )
+        if match:
+            prior_job_id = match.group(1)
+            break
+
+    if prior_job_id is not None:
+        from orchestration.automatic_continuation import read_report
+        from orchestration.store import OrchestrationRecordNotFound, OrchestrationStoreError
+
+        try:
+            report = read_report(engine, prior_job_id)
+        except OrchestrationRecordNotFound:
+            report = None
+        except (OrchestrationStoreError, ValueError, KeyError, TypeError):
+            return {
+                "ok": False,
+                "error": "job_state_unavailable",
+                "authority": "conversation_only",
+                "promotion_authority": False,
+                "verification_authority": False,
+                "transition_authority": False,
+            }, 503
+
+        if isinstance(report, dict) and report.get("result_status") == "AWAITING_HUMAN":
+            delivery = report.get("delivery")
+            if isinstance(delivery, dict):
+                return {
+                    "ok": True,
+                    "job_id": prior_job_id,
+                    "result_status": "AWAITING_HUMAN",
+                    "answer_owner": delivery.get("answer_owner"),
+                    "text": delivery.get("text", ""),
+                    "human_approved": False,
+                    "semantic_synthesis_performed": False,
+                    "authority": "conversation_only",
+                    "promotion_authority": False,
+                    "verification_authority": False,
+                    "transition_authority": False,
+                    "status_url": "/orchestration/jobs/" + prior_job_id,
+                }, 200
+
     selection_started = time.perf_counter()
     try:
         proposal, selection_provider = propose_initial_request(
@@ -2658,6 +2701,8 @@ if __name__ == "__main__":
         port=5000,
         debug=False,
     )
+
+
 
 
 

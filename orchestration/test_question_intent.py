@@ -45,6 +45,21 @@ CASES = (
         "HISTORICAL",
     ),
     (
+        "What have we achieved with Atlas over the last three days?",
+        "PROGRESS_HISTORY",
+        "HISTORICAL",
+    ),
+    (
+        "What progress have we made with Atlas recently?",
+        "PROGRESS_HISTORY",
+        "HISTORICAL",
+    ),
+    (
+        "What have we accomplished with Atlas lately?",
+        "PROGRESS_HISTORY",
+        "HISTORICAL",
+    ),
+    (
         "Tell me something interesting.",
         "UNKNOWN",
         "UNRESOLVED",
@@ -66,6 +81,21 @@ for question, expected_intent, expected_time in CASES:
         result,
         expected_time,
     )
+
+
+progress = classify_question_intent(
+    "What have we achieved with Atlas over the last three days?"
+)
+assert progress.intent == "PROGRESS_HISTORY"
+assert progress.temporal_scope == "HISTORICAL"
+assert progress.topic == "Atlas"
+
+progress = classify_question_intent(
+    "What have we actually achieved with PMEi over the last few days?"
+)
+assert progress.intent == "PROGRESS_HISTORY"
+assert progress.temporal_scope == "HISTORICAL"
+assert progress.topic == "PMEi"
 
 
 source = Path(

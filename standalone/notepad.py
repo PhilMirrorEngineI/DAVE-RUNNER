@@ -10,6 +10,12 @@ from urllib.parse import quote_plus, urlparse, parse_qs, unquote
 from datetime import datetime, timezone
 import requests
 
+# Preserve `python standalone/notepad.py` and direct `import notepad` usage.
+# The shared progress contract lives beside this directory in orchestration.
+if not __package__:
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 try:
     from standalone.historical_continuity import (
         scan_continuity_archive,
@@ -2048,40 +2054,42 @@ def best_passages(
     question,
     limit=4
 ):
-    pieces = _passage_pieces_cached(
-        text
-    )
-
+    pieces = _passage_pieces_cached(text)
+    from orchestration.progress_evidence import progress_topic, report_facets, select_coverage
+    progress = progress_topic(question)
     ranked = []
 
     for sentence in pieces:
 
-        if len(sentence) < 35:
+        report = report_facets(sentence) if progress else ()
+        if len(sentence) < 35 and not report:
             continue
+        if report and len(sentence) > 3000:
+            continue  # Do not cut a report away from a later qualifier/limitation.
 
         if hard_boilerplate_reject(sentence):
             continue
 
-        if is_meta_explanation(sentence):
+        if is_meta_explanation(sentence) and not report:
             continue
 
         if question_echo_reject(
             sentence,
-            question
+            progress or question
         ):
             continue
 
         usefulness = passage_usefulness(
             sentence,
-            question
+            progress or question
         )
 
-        if usefulness < 0.16:
+        if usefulness < 0.16 and not report:
             continue
 
         coverage = subject_coverage(
             sentence,
-            question
+            progress or question
         )['score']
 
         query_overlap = len(
@@ -2090,13 +2098,13 @@ def best_passages(
             )
             &
             set(
-                query.split()
+                subject_words(query) if progress else query.split()
             )
         )
 
         anchors = anchor_bonus(
             sentence,
-            question
+            progress or question
         )
 
         rank = (
@@ -2123,13 +2131,22 @@ def best_passages(
             item[0]
     )
 
+    selected = ranked[:limit]
+
+    if progress:
+        # Assertions about implemented/tested/unresolved work share the same
+        # ranked source surface; a heading cannot displace every useful report.
+        report_items = [item for item in ranked if report_facets(item[2])]
+        selected = select_coverage(report_items, limit, lambda item: report_facets(item[2]))
+        selected += [item for item in ranked if item not in selected][:max(0, limit-len(selected))]
+
     return [
         (
             sentence,
             usefulness
         )
         for rank, usefulness, sentence
-        in ranked[:limit]
+        in selected
     ]
 
 
@@ -2389,12 +2406,12 @@ def retrieve_pmei(
     question,
     transport=None,
     passage_selector=None,
+    prefer_continuity_chronology=False,
 ):
     evidence = []
-
-    subject = set(
-        build_subject_terms(question)
-    )
+    from orchestration.progress_evidence import progress_topic, bound_report, select_coverage, record_fields
+    progress = progress_topic(question)
+    subject = set(build_subject_terms(progress or question))
 
     transport = (
         transport
@@ -2403,7 +2420,8 @@ def retrieve_pmei(
     )
 
     for record in records:
-        text = record_text(record)
+        text = ("\n".join(value for _, value in record_fields(record))
+                if progress else record_text(record))
 
         text_subject = set(
             subject_words(text)
@@ -2426,7 +2444,9 @@ def retrieve_pmei(
         )
         for selected in selected_passages:
             passage, usefulness = selected[:2]
+            progress_facets = bound_report(passage, record, progress) if progress else ()
             evidence.append({
+                '_progress_facets': progress_facets,
                 'source':
                     'PMEi Record '
                     +
@@ -2459,7 +2479,7 @@ def retrieve_pmei(
                 'coverage':
                     subject_coverage(
                         passage,
-                        question
+                        progress or question
                     )['score']
             })
             if passage_selector is not None:
@@ -2469,19 +2489,26 @@ def retrieve_pmei(
         question
     )
 
+    chronology_preferred = (
+        current_state
+        or bool(prefer_continuity_chronology)
+    )
+
     evidence.sort(
         reverse=True,
         key=lambda item:
             (
                 (1 if item.get('activity', {}).get('position') == 'IN_REQUESTED_WINDOW' else 0),
+                (1 if item.get('_progress_facets') else 0),
+                continuity_chronology_key(item) if progress else ('', -1),
                 anchor_bonus(
                     item['text'],
-                    question
+                    progress or question
                 ),
                 item['coverage'],
                 (
                     continuity_chronology_key(item)
-                    if current_state
+                    if chronology_preferred
                     else ('', -1)
                 ),
                 item['usefulness']
@@ -2505,22 +2532,38 @@ def retrieve_pmei(
         if len(selected_record_ids) >= 20:
             break
 
+    # Reserve within the same twenty-record cap for all available progress
+    # facets. Qualification is still performed downstream on each passage.
+    if progress:
+        reports = [item for item in evidence if item.get('_progress_facets')]
+        portfolio = select_coverage(reports, 20, lambda item: item['_progress_facets'])
+        coverage_ids = list(dict.fromkeys(item['record_id'] for item in portfolio))
+        selected_record_ids = (coverage_ids + [record_id for record_id in selected_record_ids
+                                               if record_id not in coverage_ids])[:20]
+
     selected_record_ids = set(
         selected_record_ids
     )
 
-    diverse_evidence = [
-        item
-        for item in evidence
-        if item.get('record_id')
-        in selected_record_ids
-    ]
+    # Preserve useful candidate passages from the selected distinct records.
+    # Downstream qualification decides which proposition represents each
+    # record in the final bounded evidence packet.
+    diverse_evidence = []
+
+    for item in evidence:
+        record_id = item.get('record_id')
+
+        if record_id not in selected_record_ids:
+            continue
+
+        diverse_evidence.append(item)
 
     for item in diverse_evidence:
         item.pop(
             '_continuity_timestamp',
             None
         )
+        item.pop('_progress_facets', None)
 
     return diverse_evidence
 

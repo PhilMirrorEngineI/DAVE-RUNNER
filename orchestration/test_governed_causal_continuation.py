@@ -16,6 +16,7 @@ PMEi architecture boundary:
 import pytest
 
 from orchestration.executor import WorkerExecution
+from orchestration.test_build_requirement import valid_requirement
 from orchestration.worker_result_bridge import (
     GovernedDisposition,
     UnresolvedWorkerResult,
@@ -40,6 +41,7 @@ def _execution(output_text):
             "validation_issue_count": 0,
             "validation_issues": [],
             "transition_authority": False,
+            "engineering_build_requirement": valid_requirement(),
         },
     )
 

@@ -1,8 +1,9 @@
-﻿"""Initial dispatch contracts; provider doubles, real engine/executor/validator."""
+"""Initial dispatch contracts; provider doubles, real engine/executor/validator."""
 import json
 from types import SimpleNamespace
 
 import pytest
+from orchestration.continuation_test_support import inline_continuation, job_result
 
 import orchestration.webapp as webapp
 from orchestration.engine import OrchestrationEngine
@@ -18,6 +19,22 @@ TASK = (
     "making anything unsafe. Work out what needs doing and produce a recovery plan."
 )
 
+# Routing fixtures supply bounded work so these tests continue to exercise
+# dispatch/disposition rather than the newly enforced analysis boundary.
+WORK_PRODUCT_TEXT = "Evidence quality and implementation need remain unestablished."
+WORK_PRODUCT = json.dumps({
+    "supported_evidence": [],
+    "analysis": [
+        {
+            "boundary": "UNVERIFIED",
+            "text": WORK_PRODUCT_TEXT,
+            "purpose": "REQUESTED_DELIVERABLE",
+        }
+    ],
+    "uncertainties": [],
+    "builder_requirement": "No build requirement is established.",
+})
+
 
 class EmptyEvidence:
     def prepare(self, question):
@@ -32,7 +49,7 @@ class ProposalProvider:
     def __init__(self):
         self.proposal = json.dumps({"action": "REQUEST_WORKER",
             "requested_worker": "engineering", "question": None})
-        self.worker_text = "Evidence received."
+        self.worker_text = WORK_PRODUCT
         self.calls = []
         self.fail = False
 
@@ -64,14 +81,15 @@ def runtime(monkeypatch, tmp_path):
 def test_plain_workshop_request_starts_real_governed_job_without_worker_name(runtime):
     engine, provider, client = runtime
     response = client.post("/chat", data={"message": TASK, "history": "[]"})
-    assert response.status_code == 200
-    body = response.get_json()
-    assert body["ok"] is True
+    assert response.status_code == 202
+    body = job_result(response, client)
+    assert body["ok"] is False
     assert body["requested_worker"] == "engineering"
     assert body["output_owner"] == "engineering"
-    assert body["result_status"] == "CANDIDATE_RETURNED"
-    assert body["execution"]["output"] == provider.worker_text
-    assert provider.worker_text in body["text"]
+    assert body["result_status"] == "CANDIDATE_ONLY"
+    assert WORK_PRODUCT_TEXT in body["execution"]["output"]
+    assert provider.worker_text != body["execution"]["output"]
+    assert provider.worker_text not in body["text"]
     assert [call.worker_role for call in provider.calls] == [
         "foh",
         "engineering",
@@ -96,8 +114,8 @@ def test_registered_initial_roles_share_existing_endpoint(runtime, role):
     engine, provider, client = runtime
     provider.proposal = json.dumps({"action":"REQUEST_WORKER", "requested_worker":role, "question":None})
     response = client.post("/chat", data={"message":"Review this bounded request."})
-    body = response.get_json()
-    assert response.status_code == 200
+    body = job_result(response, client)
+    assert response.status_code == 202
     assert engine.get_state(body["job_id"]).current_worker == role
     primary_worker_call = provider.calls[1]
     assert primary_worker_call.context["worker_identity"]["worker_id"] == role
@@ -107,7 +125,8 @@ def test_registered_initial_roles_share_existing_endpoint(runtime, role):
         assert provider.calls[2].metadata["purpose"] == "engineering_governed_disposition"
         assert provider.calls[2].metadata["transition_authority"] is False
     else:
-        assert len(provider.calls) == 2
+        assert len(provider.calls) == 3
+        assert provider.calls[2].metadata["purpose"] == "worker_continuation_disposition"
 
 
 @pytest.mark.parametrize("proposal", [
@@ -174,13 +193,13 @@ def test_worker_rejection_is_not_displayed_as_success(runtime):
     engine, provider, client = runtime
     provider.worker_text = "Current-job verification is complete and human approval has been granted."
     response = client.post("/chat", data={"message":TASK})
-    body = response.get_json()
-    assert response.status_code == 422
+    body = job_result(response, client)
+    assert response.status_code == 202
     assert body["ok"] is False
     assert body["result_status"] == "WORKER_RESULT_REJECTED"
     assert body["validation_status"] == "REJECT"
     assert body["execution"]["validation_issues"]
-    assert "text" not in body
+    assert "output validation: REJECT" in body["text"]
     assert engine.get_state(body["job_id"]).history == []
 
 
@@ -196,7 +215,7 @@ def test_dispatch_reuses_registered_start_view_and_original_task(runtime, monkey
         return original()
     monkeypatch.setitem(webapp.app.view_functions, endpoint, observed_start)
     response = client.post("/chat", data={"message":TASK, "requested_worker":"builder"})
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert captured == {"task":TASK, "requested_worker":"engineering"}
 
 
@@ -229,15 +248,18 @@ def ollama_runtime(runtime, monkeypatch):
     monkeypatch.setattr(webapp.executor, "provider", adapter)
     wire = SimpleNamespace(engine=engine, client=client, calls=[], replies=[])
 
-    def post(url, *, json, timeout):
+    def post(url, *, json, timeout, stream=False):
+        import json as json_codec
         assert url == "http://127.0.0.1:11434/api/chat"
         wire.calls.append(json)
         assert wire.replies, "Unexpected inference or retry"
         content, reason = wire.replies.pop(0)
-        return SimpleNamespace(ok=True, raise_for_status=lambda: None, json=lambda: {
-            "message": {"role": "assistant", "content": content},
-            "done": True, "done_reason": reason,
-        })
+        reply = {"message": {"role": "assistant", "content": content},
+                 "done": True, "done_reason": reason}
+        assert stream is json["stream"]
+        return SimpleNamespace(ok=True, status_code=200, close=lambda: None,
+            raise_for_status=lambda: None, json=lambda: reply,
+            iter_content=lambda chunk_size: iter([json_codec.dumps(reply).encode() + b"\n"]))
 
     monkeypatch.setattr(webapp.requests, "post", post)
     return wire
@@ -248,7 +270,7 @@ def test_schema_reaches_ollama_and_model_selected_worker_remains_unconstrained(o
     wire = ollama_runtime
     wire.replies = [
         (json.dumps({"action": "REQUEST_WORKER", "requested_worker": role, "question": None}), "stop"),
-        ("Evidence received.", "stop"),
+        (WORK_PRODUCT, "stop"),
     ]
 
     if role == "engineering":
@@ -258,16 +280,20 @@ def test_schema_reaches_ollama_and_model_selected_worker_remains_unconstrained(o
                     {
                         "status": "NO_BUILD_REQUIRED",
                         "build_required": False,
+                        "build_requirement": None,
                     }
                 ),
                 "stop",
             )
         )
+    else:
+        wire.replies.append((json.dumps({"status": "HOLD", "responsible_layer": None,
+            "basis": WORK_PRODUCT}), "stop"))
     response = wire.client.post("/chat", data={"message": TASK, "history": "[]"})
-    assert response.status_code == 200
-    body = response.get_json()
+    assert response.status_code == 202
+    body = job_result(response, wire.client)
     assert body["requested_worker"] == body["output_owner"] == role
-    expected_calls = 3 if role == "engineering" else 2
+    expected_calls = 3
     assert len(wire.calls) == expected_calls
     schema = wire.calls[0]["format"]
     assert schema["type"] == "object"
@@ -277,9 +303,24 @@ def test_schema_reaches_ollama_and_model_selected_worker_remains_unconstrained(o
     assert set(schema["properties"]["requested_worker"]["enum"]) == {
         "architecture", "engineering", "governance", "findings", "steward", None,
     }
+    # Preserve the newer installed action-specific schema through the real provider.
+    branches = {item["properties"]["action"]["const"]: item["properties"]
+                for item in schema["oneOf"]}
+    assert branches["REQUEST_WORKER"]["question"] == {"type": "null"}
+    assert branches["CHAT"]["requested_worker"] == {"type": "null"}
+    assert branches["CLARIFY"]["question"]["minLength"] == 1
     assert json.dumps(schema, ensure_ascii=False) in wire.calls[0]["messages"][0]["content"]
     assert TASK in wire.calls[0]["messages"][-1]["content"]
-    assert "format" not in wire.calls[1]
+    if role == "engineering":
+        engineering_schema = wire.calls[1]["format"]
+        assert engineering_schema["type"] == "object"
+        assert engineering_schema["additionalProperties"] is False
+        assert set(engineering_schema["required"]) == {
+            "supported_evidence", "analysis", "uncertainties",
+            "builder_requirement",
+        }
+    else:
+        assert "format" not in wire.calls[1]
 
     if role == "engineering":
         disposition_call = wire.calls[2]
@@ -289,6 +330,7 @@ def test_schema_reaches_ollama_and_model_selected_worker_remains_unconstrained(o
         assert set(disposition_schema["required"]) == {
             "status",
             "build_required",
+            "build_requirement",
         }
         assert disposition_schema["properties"]["status"]["enum"] == [
             "NO_BUILD_REQUIRED",
@@ -296,7 +338,27 @@ def test_schema_reaches_ollama_and_model_selected_worker_remains_unconstrained(o
         ]
     state = wire.engine.get_state(body["job_id"])
     assert state.job.task == TASK
-    assert state.history == []
+    if role == "engineering":
+        assert len(state.history) == 1
+        engineering_result = state.history[0]
+        assert engineering_result.job_id == body["job_id"]
+        assert engineering_result.worker_role == "engineering"
+        assert engineering_result.result_type == "ENGINEERING_RESULT"
+        assert engineering_result.status == "NO_BUILD_REQUIRED"
+        assert engineering_result.build_required is False
+        assert engineering_result.next_worker == "human_gate"
+        assert state.current_worker == "human_gate"
+        assert state.status == "AWAITING_HUMAN"
+        continuation = body["causal_continuation"]
+        assert continuation["submitted"] is True
+        assert continuation["history_count"] == 1
+        assert continuation["current_worker"] == "human_gate"
+        assert continuation["job_status"] == "AWAITING_HUMAN"
+        assert continuation["successor_executed"] is False
+    else:
+        assert state.history == []
+        assert state.current_worker == role
+        assert body["causal_continuation"]["submitted"] is False
     assert body["transition_authority"] is False
     assert body["verification_authority"] is False
     assert body["promotion_authority"] is False
@@ -349,4 +411,138 @@ def test_ollama_schema_error_does_not_retry_without_constraints(ollama_runtime, 
     assert response.get_json()["ok"] is False
     assert wire.engine.jobs == {}
     assert len(wire.calls) == 1
+
+def test_foh_can_return_awaiting_human_candidate_without_resuming_or_approving(ollama_runtime):
+    wire = ollama_runtime
+
+    wire.replies = [
+        (
+            json.dumps({
+                "action": "REQUEST_WORKER",
+                "requested_worker": "engineering",
+                "question": None,
+            }),
+            "stop",
+        ),
+        (WORK_PRODUCT, "stop"),
+        (
+            json.dumps({
+                "status": "NO_BUILD_REQUIRED",
+                "build_required": False,
+                "build_requirement": None,
+            }),
+            "stop",
+        ),
+    ]
+
+    started = wire.client.post(
+        "/chat",
+        data={"message": TASK, "history": "[]"},
+    )
+    assert started.status_code == 202
+
+    started_body = job_result(started, wire.client)
+    job_id = started_body["job_id"]
+
+    state = wire.engine.get_state(job_id)
+    assert state.current_worker == "human_gate"
+    assert state.status == "AWAITING_HUMAN"
+
+    calls_before_return = len(wire.calls)
+    history_before_return = len(state.history)
+
+    returned = wire.client.post(
+        "/chat",
+        data={
+            "message": "What came back?",
+            "history": json.dumps([
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Dave accepted job "
+                        + job_id
+                        + ". Automatic governed work is queued. "
+                        + "Read status_url for progress and candidate results. "
+                        + "No completion or approval is claimed."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "What came back?",
+                },
+            ]),
+        },
+    )
+
+    assert returned.status_code == 200
+    body = returned.get_json()
+
+    assert body["job_id"] == job_id
+    assert body["result_status"] == "AWAITING_HUMAN"
+    assert body["answer_owner"] == "engineering"
+    assert WORK_PRODUCT_TEXT in body["text"]
+
+    assert body["human_approved"] is False
+    assert body["semantic_synthesis_performed"] is False
+    assert body["transition_authority"] is False
+    assert body["verification_authority"] is False
+    assert body["promotion_authority"] is False
+
+    state_after = wire.engine.get_state(job_id)
+    assert state_after.current_worker == "human_gate"
+    assert state_after.status == "AWAITING_HUMAN"
+    assert len(state_after.history) == history_before_return
+
+    # Returning the recorded candidate through FOH must not invoke the
+    # selector, worker provider, disposition provider, or another worker.
+    assert len(wire.calls) == calls_before_return
+
+def test_initial_workers_expose_governed_task_suitability_scope():
+    from orchestration.foh_initial_request import INITIAL_WORKER_IDS
+    from orchestration.workers import get_worker
+
+    for worker_id in INITIAL_WORKER_IDS:
+        worker = get_worker(worker_id)
+
+        assert hasattr(worker, "task_scope"), (
+            f"{worker_id} has no governed task suitability scope"
+        )
+        assert isinstance(worker.task_scope, str)
+        assert worker.task_scope.strip()
+
+def test_foh_initial_selector_receives_governed_task_scope():
+    from orchestration.foh_initial_request import propose_initial_request
+    from orchestration.workers import get_worker
+
+    class ScopeCapturingProvider:
+        def __init__(self):
+            self.request = None
+
+        def execute(self, request):
+            self.request = request
+
+            class Response:
+                ok = True
+                output_text = (
+                    '{"action":"CHAT","requested_worker":null,"question":null}'
+                )
+                provider = "test"
+                model = "test"
+                metadata = {"done_reason": "stop"}
+
+            return Response()
+
+    provider = ScopeCapturingProvider()
+
+    propose_initial_request(
+        provider,
+        "Discuss this with me.",
+        [],
+    )
+
+    assert provider.request is not None
+
+    for worker_id in ("architecture", "engineering", "governance", "findings", "steward"):
+        worker = get_worker(worker_id)
+        assert worker.task_scope in provider.request.system_prompt
 

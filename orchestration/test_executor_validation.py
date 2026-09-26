@@ -6,6 +6,7 @@ from pathlib import Path
 from orchestration.contracts import OrchestrationJob, WorkerResult
 from orchestration.engine import OrchestrationEngine
 from orchestration.executor import WorkerExecutor
+from orchestration.test_build_requirement import valid_requirement
 from orchestration.providers import BaseProvider, ProviderResponse
 from orchestration.store import JsonOrchestrationStore
 
@@ -56,6 +57,11 @@ def test_knobhead_cannot_manufacture_human_gate():
             result_type="ENGINEERING_REQUIREMENT",
             status="READY_FOR_BUILD",
             build_required=True,
+            output={
+                "candidate_output": "INFERENCE: bounded candidate implementation proposed.",
+                "validation_status": "ACCEPT",
+                "build_requirement": valid_requirement(),
+            },
         )
     )
 
@@ -65,6 +71,10 @@ def test_knobhead_cannot_manufacture_human_gate():
             worker_role="builder",
             result_type="BUILD_CANDIDATE",
             status="BUILD_CANDIDATE",
+            output={
+                "candidate_output": "INFERENCE: candidate code, not executed or verified.",
+                "validation_status": "ACCEPT",
+            },
         )
     )
 

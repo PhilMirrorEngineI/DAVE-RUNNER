@@ -6,6 +6,7 @@ from dataclasses import dataclass
 class QuestionIntent:
     intent: str
     temporal_scope: str
+    topic: str | None = None
 
 
 def _clean(text: str) -> str:
@@ -24,6 +25,11 @@ def classify_question_intent(question: str) -> QuestionIntent:
 
     if not q:
         return QuestionIntent("UNKNOWN", "UNRESOLVED")
+
+    from .progress_evidence import implementation_progress_topic
+    diagnostic_topic = implementation_progress_topic(question)
+    if diagnostic_topic:
+        return QuestionIntent("PROGRESS_HISTORY", "HISTORICAL", diagnostic_topic)
 
     explicit_change_comparison = any(
         marker in q
@@ -113,6 +119,32 @@ def classify_question_intent(question: str) -> QuestionIntent:
         return QuestionIntent(
             "DECISION",
             "HISTORICAL",
+        )
+
+    progress_history = (
+        re.search(
+            r"\bwhat\s+(?:have|had)\s+we\s+"
+            r"(?:actually\s+)?(?:achieved|accomplished)\s+with\s+"
+            r"(?P<topic>.+?)"
+            r"(?:\s+over\s+.+?|\s+recently|\s+lately)?[?.!]?$",
+            question.strip().split("?", 1)[0].strip(),
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\bwhat\s+progress\s+(?:have|had)\s+we\s+"
+            r"made\s+with\s+"
+            r"(?P<topic>.+?)"
+            r"(?:\s+over\s+.+?|\s+recently|\s+lately)?[?.!]?$",
+            question.strip().split("?", 1)[0].strip(),
+            re.IGNORECASE,
+        )
+    )
+
+    if progress_history:
+        return QuestionIntent(
+            "PROGRESS_HISTORY",
+            "HISTORICAL",
+            progress_history.group("topic").strip(),
         )
 
     if any(
