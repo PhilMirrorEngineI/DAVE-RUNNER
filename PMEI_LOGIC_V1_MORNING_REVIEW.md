@@ -11,16 +11,40 @@ Authority basis reviewed: PMEi records 89, 134, 177, 361, 362, 363, 367–373.
 
 Final candidate orchestration suite:
 
-- **925 passed**
+- **926 passed**
 - **95 subtests passed**
-- **1 deselected**
+- **1 skipped**
 
-The deselected test is `test_substantive_governed_learning_survives_bounded_selection`.
-It was independently reproduced against untouched production with the same
-assertion. It remains a separate PMEi live-data / retrieval-surface issue and
-is not treated as a regression caused by this candidate.
+The previous governed-learning red test has been split into a deterministic
+regression plus a live PMEi integration check. The deterministic regression
+passes and proves that deep, authority-eligible governed learning survives the
+8-item evidence bound without being promoted to DIRECT task alignment. The live
+integration check skips in this PowerShell test shell because
+`DAVE_RUNNER_API_KEY` is not configured there. The skip reports the missing
+PMEi read credential explicitly rather than misreporting a selection failure.
 
 Production tracked/staged source has not been modified by this branch.
+
+## Guarded installation readiness
+
+Three reviewed operational scripts are included:
+
+- `INSTALL_LOGIC_V1_CANDIDATE.ps1`
+- `ROLLBACK_LOGIC_V1_CANDIDATE.ps1`
+- `VERIFY_LOGIC_V1_POST_INSTALL.ps1`
+
+The installer refuses the wrong production HEAD, dirty tracked/staged production,
+the wrong candidate branch, or a dirty candidate worktree. It derives the exact
+reviewed orchestration delta, runs the complete candidate suite before copying,
+backs up every touched production file, runs the complete production suite after
+copying, and automatically restores the backup on verification failure.
+
+The installer deliberately does not restart the server, create a Git commit,
+merge/push/deploy, submit a human decision, or write PMEi continuity.
+
+Its dry run was executed successfully. It identified **38 reviewed orchestration
+files**, reran **926 passed / 1 skipped / 95 subtests**, then exited with
+`DRY RUN COMPLETE. Nothing was installed.`
 
 ## Checklist state
 
