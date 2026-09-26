@@ -1,8 +1,8 @@
 # PMEi Logic Contract v1 — Morning Review Candidate
 
-Status: **AWAITING HUMAN APPROVAL**  
-Canonical: **NO**  
-Production installed: **NO**  
+Status: **AWAITING HUMAN APPROVAL**
+Canonical: **NO**
+Production installed: **NO**
 Human approval recorded: **NO**
 
 Authority basis reviewed: PMEi records 89, 134, 177, 361, 362, 363, 367–373.
