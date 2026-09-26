@@ -75,13 +75,15 @@ Write-Host ""
 Write-Host "Running candidate regression before any copy..."
 $oldStore = $env:PMEI_ORCHESTRATION_STORE_DIR
 $env:PMEI_ORCHESTRATION_STORE_DIR = Join-Path $ProductionRoot 'orchestration\orchestration_state'
+Push-Location $CandidateRoot
 try {
-    & (Join-Path $ProductionRoot '.venv\Scripts\python.exe') -m pytest -q (Join-Path $CandidateRoot 'orchestration')
+    & (Join-Path $ProductionRoot '.venv\Scripts\python.exe') -m pytest -q orchestration
     if ($LASTEXITCODE -ne 0) {
         throw "Candidate regression failed. Nothing installed."
     }
 }
 finally {
+    Pop-Location
     $env:PMEI_ORCHESTRATION_STORE_DIR = $oldStore
 }
 
