@@ -99,13 +99,15 @@ class WorkerOutputValidator:
         r"\bhave deployed\b",
         r"\bhas approved\b",
         r"\bhave approved\b",
-        r"\bcompleted\b",
         r"\bwas completed\b",
         r"\bwere completed\b",
         r"\b(?:implementation|build|testing|tests|verification)\s+(?:is|are|was|were)\s+complete\b",
         r"\b(?:approval|human approval)\s+(?:has|have|had)\s+been\s+granted\b",
         r"\b(?:approval|human approval)\s+(?:is|was)\s+granted\b",
-        r"\b(?:verified|approved|deployed|tested|executed)\b",
+        r"\b(?:implementation|build|deployment|code(?: execution)?|tests?|testing|verification|approval|human approval|execution|worker|job|system|unit|design|inspection|handoff|candidate|patch|package|artifact|result|change)\b.{0,40}\b(?:has|have|had)\s+(?:been\s+)?(?:completed|built|executed|tested|verified|approved|deployed|produced|passed|failed|packaged)\b",
+        r"\b(?:implementation|build|deployment|code(?: execution)?|tests?|testing|verification|approval|human approval|execution|worker|job|system|unit|design|inspection|handoff|candidate|patch|package|artifact|result|change)\b.{0,30}\b(?:is|are|was|were)\s+(?:now\s+)?(?:completed|complete|built|executed|tested|verified|approved|deployed|operational|working|active|packaged)\b",
+        r"\b(?:implementation|build|deployment|code(?: execution)?|tests?|testing|verification|approval|human approval|execution|worker|job|system|unit|design|inspection|handoff|candidate|patch|package|artifact|result|change)\b.{0,25}\b(?:passed|failed|completed|executed|tested|verified|approved|deployed|produced|packaged)\b",
+        r"\b(?:inspection|test|testing|verification)\b.{0,30}\b(?:confirmed|established|determined|found)\b",
     )
 
     SECTION_HEADERS = {
@@ -411,9 +413,42 @@ class WorkerOutputValidator:
                     clause,
                 )
 
+            # Conditional/modal event language describes a possible,
+            # required or future state; it does not assert that the event
+            # already happened. Remove only the bounded modal phrase so a
+            # separate positive assertion in the same clause can still match.
+            if re.match(
+                r"^\s*(?:if|when|once|unless|provided(?:\s+that)?)\b",
+                clause,
+            ):
+                conditional = re.match(
+                    r"^\s*(?:if|when|once|unless|provided(?:\s+that)?)\b"
+                    r"[^,]{0,240}(?:,\s*|$)",
+                    clause,
+                )
+                if conditional:
+                    clause = clause[conditional.end():].strip()
+                    if not clause:
+                        continue
+
+            modal_event = (
+                r"\b(?:would|could|should|may|might|can|must|will)\s+"
+                r"(?:(?:still|later|eventually|then)\s+){0,2}"
+                r"(?:(?:need|needs)\s+to\s+)?"
+                r"(?:(?:be|have\s+been)\s+)?"
+                r"(?:completed|built|executed|tested|verified|approved|"
+                r"deployed|produced|passed|failed|packaged|operational|"
+                r"working|active)\b"
+            )
+            clause = re.sub(
+                modal_event,
+                " ",
+                clause,
+            )
+
             # A negated event is not a positive execution claim.
             # Do not let negation in a different clause mask this one.
-            event = r"(?:executed|completed|built|deployed|tested|verified|approved|granted|produced|passed|failed)"
+            event = r"(?:executed|completed|built|deployed|tested|verified|approved|granted|produced|passed|failed|packaged)"
             adverb = r"(?:(?:independently|fully|yet|actually|currently|successfully|formally)\s+){0,3}"
             events = event + r"(?:\s+(?:or|nor)\s+" + adverb + event + r")*\b"
             subject = r"(?:implementation|deployment|state transition|code(?: execution)?|build|tests?|testing|verification|human approval|approval|execution|worker)"
@@ -450,7 +485,7 @@ class WorkerOutputValidator:
     def event_clauses(self, claim: str) -> List[str]:
         """Keep a separate positive event outside a preceding bounded clause."""
         return re.split(
-            r"(?<=[.!?])\s+|;\s*|\s*[,]?\s+\b(?:but|however)\s+|"
+            r"(?<!\d\.)(?<=[.!?])\s+|;\s*|\s*[,]?\s+\b(?:but|however)\s+|"
             r"\s+and\s+(?=(?:the\s+)?(?:human\s+)?"
             r"(?:approval|build|code|deployment|implementation|tests?|verification)\b)",
             self.clean_text(claim), flags=re.IGNORECASE,

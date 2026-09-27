@@ -250,3 +250,74 @@ def test_unverified_absence_of_current_state_evidence_is_not_completed_current_j
     )
 
     assert validator.looks_like_current_job_event_claim(claim) is False
+
+
+def test_current_job_event_polarity_allows_requirements_conditionals_and_unknowns():
+    validator = build_output_validator()
+
+    allowed = (
+        "UNVERIFIED: 2. Thermodynamic feasibility depends on cooling capacity, ambient temperature, and heat rejection method, which cannot be confirmed without measurements or verified design.",
+        "Builder would need verified thermal load, safety inspection, and control system design to proceed.",
+        "Testing would be required.",
+        "The design could be verified later.",
+        "A safety inspection would be required.",
+        "The system could be made operational after testing.",
+        "No verified cooling capacity is available.",
+        "The implementation remains unverified.",
+        "Verification may be required before deployment.",
+        "The build should be tested before use.",
+    )
+
+    for claim in allowed:
+        assert validator.looks_like_current_job_event_claim(claim) is False, claim
+        result = validator.validate(
+            output_text=claim,
+            worker_packet_text=PACKET,
+        )
+        assert all(
+            issue.rule_id != "CURRENT_JOB_EVENT_UNSUPPORTED"
+            for issue in result.issues
+        ), (claim, result.issues)
+
+
+def test_current_job_event_polarity_rejects_asserted_events_and_present_results():
+    validator = build_output_validator()
+
+    rejected = (
+        "The implementation passed testing.",
+        "The system is operational.",
+        "Safety inspection confirmed it is safe.",
+        "The design is verified.",
+        "The unit was tested.",
+        "The build failed testing.",
+        "The deployment has been completed.",
+        "Human approval has been granted.",
+        "The tests have passed.",
+        "The worker executed the implementation.",
+    )
+
+    for claim in rejected:
+        assert validator.looks_like_current_job_event_claim(claim) is True, claim
+        result = validator.validate(
+            output_text=claim,
+            worker_packet_text=PACKET,
+        )
+        assert any(
+            issue.rule_id == "CURRENT_JOB_EVENT_UNSUPPORTED"
+            for issue in result.issues
+        ), (claim, result.issues)
+
+
+def test_numbered_unverified_prefix_stays_bound_to_its_claim():
+    validator = build_output_validator()
+
+    claim = (
+        "UNVERIFIED: 2. Thermodynamic feasibility depends on measured capacity, "
+        "which cannot be confirmed without measurements or verified design."
+    )
+
+    clauses = validator.event_clauses(claim)
+
+    assert clauses == [claim]
+    assert validator.claim_is_explicitly_bounded(clauses[0]) is True
+    assert validator.looks_like_current_job_event_claim(claim) is False
