@@ -382,3 +382,87 @@ def test_m3_positive_replay_payload_binding_and_m4_independent_readback(monkeypa
         and item["details"].get("reason") == "action_payload_hash_mismatch"
         for item in bound_events
     )
+
+
+def test_m3_authorize_requires_separate_human_key_and_m4_is_read_only(monkeypatch):
+    fake = FakeDB()
+    monkeypatch.setattr(server, "get_db", fake.connect)
+    monkeypatch.setattr(server, "DAVE_RUNNER_API_KEY", "test-api")
+    monkeypatch.setattr(server, "PMEI_HUMAN_APPROVAL_KEY", "test-human")
+    monkeypatch.setattr(server, "OWNER_USER_ID", "phil")
+
+    client = server.app.test_client()
+    payload = {
+        "action_type": "m3_test_mutation",
+        "mutation_class": "test_state_write",
+        "subject_type": "m3_test_state",
+        "subject_id": "m3-human-boundary-v1",
+        "rationale": "M3 human authority boundary proof",
+        "action_payload": {
+            "state_key": "m3-human-boundary-v1",
+            "value": {"status": "must-not-run-without-human-key"},
+        },
+    }
+
+    missing_human = client.post(
+        "/memory/action/authorize",
+        headers=_headers(human=False),
+        json=payload,
+    )
+    assert missing_human.status_code == 403
+    assert fake.human_decisions == {}
+    assert fake.actions == {}
+    assert fake.state == {}
+
+    wrong_human = client.post(
+        "/memory/action/authorize",
+        headers={
+            "X-API-KEY": "test-api",
+            "X-PMEI-HUMAN-KEY": "wrong-human",
+        },
+        json=payload,
+    )
+    assert wrong_human.status_code == 403
+    assert fake.human_decisions == {}
+    assert fake.actions == {}
+    assert fake.state == {}
+
+    exact_payload = {
+        "state_key": "m4-read-only-v1",
+        "value": {"status": "verified-without-mutation"},
+    }
+    authority = _authorize(client, exact_payload, "m4-read-only-v1")
+    execute = client.post(
+        "/memory/action/test",
+        headers=_headers(),
+        json={
+            "action_id": authority["action_id"],
+            "action_payload": exact_payload,
+            "actor": "external_worker_test",
+        },
+    )
+    assert execute.status_code == 200
+
+    state_before = dict(fake.state["m4-read-only-v1"])
+    action_before = dict(fake.actions[authority["action_id"]])
+    audit_count_before = len(fake.audit)
+
+    verify = client.post(
+        "/memory/action/verify",
+        headers=_headers(),
+        json={
+            "state_key": "m4-read-only-v1",
+            "expected_value": exact_payload["value"],
+            "expected_action_id": authority["action_id"],
+        },
+    )
+    assert verify.status_code == 200
+    data = verify.get_json()["data"]
+    assert data["verified"] is True
+    assert data["mutation_authority"] is False
+    assert data["promotion_authority"] is False
+    assert data["human_approval_authority"] is False
+
+    assert fake.state["m4-read-only-v1"] == state_before
+    assert fake.actions[authority["action_id"]] == action_before
+    assert len(fake.audit) == audit_count_before
