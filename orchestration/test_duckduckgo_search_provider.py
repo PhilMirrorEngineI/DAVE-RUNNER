@@ -43,6 +43,7 @@ def test_duckduckgo_provider_returns_external_search_results():
         session=session,
         timeout=15,
         max_results=8,
+        warmup_delay=0,
     )
 
     results = provider.search(
@@ -60,8 +61,11 @@ def test_duckduckgo_provider_returns_external_search_results():
     assert results[0]["source_class"] == "web"
     assert results[0]["retrieved_at_utc"]
 
-    assert len(session.calls) == 1
-    assert "html.duckduckgo.com" in session.calls[0]["url"]
-    assert "broken+washing+machine" in session.calls[0]["url"]
-    assert session.calls[0]["timeout"] == 15
-    assert "User-Agent" in session.calls[0]["headers"]
+    assert len(session.calls) == 2
+    assert "duckduckgo.com/?q=" in session.calls[0]["url"]
+    assert "&ia=web" in session.calls[0]["url"]
+    assert "html.duckduckgo.com" in session.calls[1]["url"]
+    assert "broken+washing+machine" in session.calls[1]["url"]
+    assert session.calls[1]["timeout"] == 15
+    assert "User-Agent" in session.calls[1]["headers"]
+    assert session.calls[1]["headers"]["Referer"] == session.calls[0]["url"]
