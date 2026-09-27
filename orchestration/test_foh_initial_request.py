@@ -10,6 +10,7 @@ from orchestration.engine import OrchestrationEngine
 from orchestration.executor import WorkerExecutor
 from orchestration.providers import OllamaProvider, ProviderResponse
 from orchestration.store import JsonOrchestrationStore
+from orchestration.user_interaction_profile import UserInteractionProfileStore
 
 
 TASK = (
@@ -69,6 +70,11 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(webapp, "engine", engine)
     monkeypatch.setattr(webapp, "provider", provider)
     monkeypatch.setattr(webapp, "executor", executor)
+    monkeypatch.setattr(
+        webapp,
+        "user_profile_store",
+        UserInteractionProfileStore(tmp_path / "profiles", "test-user"),
+    )
     monkeypatch.setattr(webapp, "_foh_pmei_prepare_for_question", lambda task: {
         "ok": True, "retrieval_ok": True, "context": "", "evidence_count": 0,
         "records_received": 0})
@@ -646,3 +652,70 @@ def test_general_knowledge_stays_in_foh_without_worker_or_pmei(runtime, monkeypa
     assert ollama_calls[0]["messages"][-1]["content"] == (
         "Why do leaves change colour in autumn?"
     )
+
+
+def test_general_chat_applies_presentation_profile_without_pmei_or_worker(runtime, monkeypatch):
+    engine, provider, client = runtime
+    monkeypatch.setattr(provider, "clean_output_text", lambda value: value, raising=False)
+
+    captured = {}
+
+    def local_chat(url, *, json, timeout, **kwargs):
+        assert url == "http://127.0.0.1:11434/api/chat"
+        captured["messages"] = json["messages"]
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "message": {"content": "Rainbows form when sunlight is refracted, reflected and dispersed by water droplets."},
+                "done_reason": "stop",
+            },
+        )
+
+    monkeypatch.setattr(webapp.requests, "post", local_chat)
+    monkeypatch.setattr(
+        webapp,
+        "_foh_pmei_prepare_for_question",
+        lambda *args, **kwargs: pytest.fail(
+            "Obvious general chat must not query PMEi."
+        ),
+    )
+
+    history = [
+        {"role": "user", "content": "Can you show me that pls?"},
+        {"role": "assistant", "content": "Previous answer."},
+        {"role": "user", "content": "Did it work?"},
+        {"role": "assistant", "content": "Previous answer."},
+        {"role": "user", "content": "What does that mean?"},
+        {"role": "assistant", "content": "Previous answer."},
+        {"role": "user", "content": "Can we try another one?"},
+        {"role": "assistant", "content": "Previous answer."},
+        {"role": "user", "content": "Yeah go on then."},
+    ]
+
+    response = client.post(
+        "/chat",
+        data={
+            "message": "How do rainbows form?",
+            "history": json.dumps(history),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["authority"] == "conversation_only"
+    assert body["pmei_context_used"] is False
+    assert body["interaction_profile_used"] is True
+    assert body["interaction_profile_observations"] == 6
+    assert body["interaction_profile_confidence"] > 0
+    assert engine.jobs == {}
+    assert provider.calls == []
+
+    system_text = "\n".join(
+        item["content"]
+        for item in captured["messages"]
+        if item["role"] == "system"
+    )
+    assert "USER INTERACTION PROFILE" in system_text
+    assert "PRESENTATION ONLY" in system_text
+    assert "iterative" in system_text.lower()
+    assert "cannot alter facts" in system_text
