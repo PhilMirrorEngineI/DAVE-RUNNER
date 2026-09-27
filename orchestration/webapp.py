@@ -22,7 +22,12 @@ from orchestration.engine import OrchestrationEngine
 from orchestration.workers import get_worker
 from orchestration.executor import WorkerExecutor
 from orchestration.providers import OllamaProvider
-from orchestration.foh_initial_request import InitialRequestError, propose_initial_request
+from orchestration.foh_initial_request import (
+    InitialRequestError,
+    InitialRequestProposal,
+    propose_initial_request,
+)
+from orchestration.foh_chat_guard import obvious_foh_chat
 from orchestration.output_validator import WorkerOutputValidator
 from orchestration.deterministic_answer import render_deterministic_answer
 from orchestration.question_intent import classify_question_intent
@@ -2262,10 +2267,19 @@ def local_ollama_chat():
                 }, 200
 
     selection_started = time.perf_counter()
+    direct_general_chat = obvious_foh_chat(message)
     try:
-        proposal, selection_provider = propose_initial_request(
-            provider, message, history, model=FOH_OLLAMA_MODEL,
-        )
+        if direct_general_chat:
+            proposal = InitialRequestProposal("CHAT", None, None)
+            selection_provider = {
+                "provider": "deterministic",
+                "model": "none",
+                "route_reason": "obvious_general_chat",
+            }
+        else:
+            proposal, selection_provider = propose_initial_request(
+                provider, message, history, model=FOH_OLLAMA_MODEL,
+            )
     except InitialRequestError as exc:
         return {
             "ok": False,
@@ -2315,7 +2329,18 @@ def local_ollama_chat():
     # to the conversational model.
     foh_total_started = time.perf_counter()
     pmei_prepare_started = time.perf_counter()
-    pmei_read = _foh_pmei_prepare_for_question(message)
+    if direct_general_chat:
+        pmei_read = {
+            "ok": True,
+            "retrieval_ok": True,
+            "context": "",
+            "evidence_count": 0,
+            "records_received": 0,
+            "route": None,
+            "skipped_reason": "obvious_general_chat",
+        }
+    else:
+        pmei_read = _foh_pmei_prepare_for_question(message)
     pmei_prepare_seconds = (
         time.perf_counter() - pmei_prepare_started
     )
@@ -2326,17 +2351,25 @@ def local_ollama_chat():
         else ""
     )
 
-    instructions = (
-        "You are Front-of-House Dave inside the PMEi cockpit. "
-        "Use bounded READ ONLY PMEi continuity context when supplied "
-        "and clearly distinguish retrieved evidence from inference. "
-        "Historical evidence does not automatically establish present-state truth. "
-        "Under PMEi Record 255, FOH may append READ ONLY continuity only "
-        "through the deterministic server adapter. "
-        "You have no authority to verify, promote, canonicalise, approve, "
-        "overwrite, delete, deploy, or transition orchestration. "
-        "Never claim a PMEi write occurred unless the server explicitly reports success."
-    )
+    if direct_general_chat:
+        instructions = (
+            "You are Dave, answering an ordinary conversational or general-knowledge "
+            "question. Answer directly, naturally, and concisely using general knowledge. "
+            "Do not invent sources and do not describe internal processing. "
+            "If you do not know, say so plainly."
+        )
+    else:
+        instructions = (
+            "You are Front-of-House Dave inside the PMEi cockpit. "
+            "Use bounded READ ONLY PMEi continuity context when supplied "
+            "and clearly distinguish retrieved evidence from inference. "
+            "Historical evidence does not automatically establish present-state truth. "
+            "Under PMEi Record 255, FOH may append READ ONLY continuity only "
+            "through the deterministic server adapter. "
+            "You have no authority to verify, promote, canonicalise, approve, "
+            "overwrite, delete, deploy, or transition orchestration. "
+            "Never claim a PMEi write occurred unless the server explicitly reports success."
+        )
 
     messages = [{
         "role": "system",
@@ -2723,10 +2756,16 @@ def local_ollama_chat():
             "text": text_out,
             "model": model,
             "provider": "ollama",
-            "authority": "conversation_plus_read_only_continuity",
+            "authority": (
+                "conversation_plus_read_only_continuity"
+                if pmei_context
+                else "conversation_only"
+            ),
             "pmei_context_used": bool(pmei_context),
             "pmei_records_used": len(pmei_context),
-            "pmei_write_authority": "READ ONLY",
+            "pmei_write_authority": (
+                "READ ONLY" if pmei_context else "NONE"
+            ),
             "promotion_authority": False,
             "verification_authority": False,
             "transition_authority": False,
