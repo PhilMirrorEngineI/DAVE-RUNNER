@@ -28,6 +28,10 @@ from orchestration.foh_initial_request import (
     propose_initial_request,
 )
 from orchestration.foh_chat_guard import obvious_foh_chat
+from orchestration.user_interaction_profile import (
+    UserInteractionProfileStore,
+    render_profile_instruction,
+)
 from orchestration.output_validator import WorkerOutputValidator
 from orchestration.deterministic_answer import render_deterministic_answer
 from orchestration.question_intent import classify_question_intent
@@ -54,6 +58,10 @@ from orchestration.worker_result_bridge import (
 APP_ROOT = Path(__file__).resolve().parent.parent
 STATE_ROOT = APP_ROOT / ".local_orchestration_state"
 STATE_ROOT.mkdir(parents=True, exist_ok=True)
+USER_PROFILE_ROOT = APP_ROOT / ".local_user_profiles"
+USER_PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
+USER_PROFILE_REF = os.getenv("FOH_USER_REF", "local-owner").strip() or "local-owner"
+user_profile_store = UserInteractionProfileStore(USER_PROFILE_ROOT, USER_PROFILE_REF)
 
 app = Flask(__name__)
 
@@ -2211,6 +2219,17 @@ def local_ollama_chat():
         except (json.JSONDecodeError, TypeError):
             history = []
 
+    user_style_messages = [
+        item.get("content", "")
+        for item in history
+        if item.get("role") == "user"
+    ]
+    user_style_messages.append(message)
+    interaction_profile = user_profile_store.observe(user_style_messages)
+    interaction_profile_instruction = render_profile_instruction(
+        interaction_profile
+    )
+
     # Bounded initial request proposal. The existing governed endpoint remains
     # responsible for validating the requested role, creating and executing jobs.
     # Worker results remain candidates; no WorkerResult is submitted here.
@@ -2375,6 +2394,12 @@ def local_ollama_chat():
         "role": "system",
         "content": instructions,
     }]
+
+    if interaction_profile_instruction:
+        messages.append({
+            "role": "system",
+            "content": interaction_profile_instruction,
+        })
 
     if pmei_context:
         messages.append({
@@ -2774,6 +2799,13 @@ def local_ollama_chat():
                 validation.status
                 if validation is not None
                 else "NOT_APPLICABLE"
+            ),
+            "interaction_profile_used": bool(interaction_profile_instruction),
+            "interaction_profile_confidence": interaction_profile.get(
+                "confidence", 0.0
+            ),
+            "interaction_profile_observations": interaction_profile.get(
+                "observations", 0
             ),
             "timing": {
                 "pmei_prepare_seconds": round(
