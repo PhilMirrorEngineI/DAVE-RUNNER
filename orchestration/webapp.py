@@ -32,6 +32,10 @@ from orchestration.user_interaction_profile import (
     UserInteractionProfileStore,
     render_profile_instruction,
 )
+from orchestration.foh_specialist_presentation import (
+    present_report,
+    present_specialist_delivery,
+)
 from orchestration.output_validator import WorkerOutputValidator
 from orchestration.deterministic_answer import render_deterministic_answer
 from orchestration.question_intent import classify_question_intent
@@ -1481,7 +1485,8 @@ def orchestration_job_status(job_id):
     except (OrchestrationStoreError, ValueError, KeyError, TypeError):
         return {"ok": False, "error": "job_state_unavailable", "transition_authority": False}, 503
     report["status_url"] = "/orchestration/jobs/" + job_id
-    return report, 200
+    profile = user_profile_store.describe()
+    return present_report(report, profile), 200
 
 
 @app.post("/orchestration/request-engineering")
@@ -2340,12 +2345,19 @@ def local_ollama_chat():
         if isinstance(report, dict) and report.get("result_status") == "AWAITING_HUMAN":
             delivery = report.get("delivery")
             if isinstance(delivery, dict):
+                presentation = present_specialist_delivery(
+                    delivery,
+                    interaction_profile,
+                )
                 return {
                     "ok": True,
                     "job_id": prior_job_id,
                     "result_status": "AWAITING_HUMAN",
                     "answer_owner": delivery.get("answer_owner"),
-                    "text": delivery.get("text", ""),
+                    "presentation_owner": "foh",
+                    "text": presentation.get("text") or delivery.get("text", ""),
+                    "foh_presentation": presentation,
+                    "raw_specialist_answer": delivery.get("answer", ""),
                     "human_approved": False,
                     "semantic_synthesis_performed": False,
                     "authority": "conversation_only",

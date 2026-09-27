@@ -40,7 +40,7 @@ function pmeiCandidateBubble(){
   wrap.appendChild(bubble);
   return {show:d=>{
     bubble.querySelector('.meta').textContent=d.job_id?d.job_id+' · '+(d.result_status||'QUEUED'):'Dave';
-    bubble.querySelector('.pmei-answer').textContent=d.delivery?.text||d.text||d.error||'Dave is working on this request.';
+    bubble.querySelector('.pmei-answer').textContent=d.foh_presentation?.text||d.text||d.delivery?.text||d.error||'Dave is working on this request.';
     wrap.scrollTop=wrap.scrollHeight;
   },fail:message=>{bubble.querySelector('.meta').textContent=message;}};
 }
@@ -66,7 +66,7 @@ async function sendChat(){
       pmeiJobPath(data);receipt=data;pmeiRememberJob(data);
       data=await watchPmeiJob(data,bubble.show);pmeiForgetJob();
     }else if(!response.ok){return}
-    const answer=data.delivery?.text||data.text;
+    const answer=data.foh_presentation?.text||data.text||data.delivery?.text;
     if(answer){chatHistory.push({role:'user',content:msg},{role:'assistant',content:answer});chatHistory=chatHistory.slice(-20)}
   }catch(e){
     bubble.fail(receipt?'Status reading paused for '+receipt.job_id+'. Reload to keep watching; no task was resubmitted.':'Request status uncertain. Check the server before submitting again.');
