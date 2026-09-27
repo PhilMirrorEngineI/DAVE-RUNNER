@@ -89,16 +89,25 @@ class DuckDuckGoSearchProvider:
         session=None,
         timeout: int = 15,
         max_results: int = 8,
+        headers=None,
     ):
         self.session = session or requests.Session()
         self.timeout = timeout
         self.max_results = max_results
+        self.headers = headers or {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/154.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-GB,en;q=0.9",
+        }
 
     def search(self, question: str) -> List[Dict[str, Any]]:
         response = self.session.get(
             "https://html.duckduckgo.com/html/?q="
             + quote_plus(question),
             timeout=self.timeout,
+            headers=dict(self.headers),
         )
 
         response.raise_for_status()
@@ -145,12 +154,20 @@ class DuckDuckGoSearchProvider:
             if not source or not text:
                 continue
 
+            from datetime import datetime, timezone
+
             output.append(
                 {
                     "source": source,
                     "url": url,
                     "text": text,
                     "retrieval_type": "WEB_SNIPPET",
+                    "provider": "duckduckgo",
+                    "retrieval_lane": "duckduckgo",
+                    "source_class": "web",
+                    "retrieved_at_utc": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
                 }
             )
 
@@ -253,11 +270,133 @@ class BraveSearchProvider:
                 valid = False
             if not valid or not title or not snippet or url in seen:continue
             seen.add(url)
-            output.append({"source": title, "url": url, "text": snippet,
-                           "retrieval_type": "WEB_SNIPPET", "provider": "brave",
-                           "retrieved_at_utc": retrieved})
+            output.append({
+                "source": title,
+                "url": url,
+                "text": snippet,
+                "retrieval_type": "WEB_SNIPPET",
+                "provider": "brave",
+                "retrieval_lane": "brave",
+                "source_class": "web",
+                "retrieved_at_utc": retrieved,
+            })
             if len(output) >= self.max_results:break
         return output
+
+
+
+class MultiPassSearchProvider:
+    """Independent external retrieval passes with explicit provenance.
+
+    Brave general search is primary. DuckDuckGo HTML is opportunistic and
+    fail-closed. Reddit is retrieved through a Brave site-restricted query and
+    labelled as community evidence rather than authoritative corroboration.
+    """
+
+    def __init__(
+        self,
+        brave=None,
+        duckduckgo=None,
+        reddit=None,
+        include_reddit=True,
+    ):
+        self.brave = brave if brave is not None else BraveSearchProvider()
+        self.duckduckgo = (
+            duckduckgo
+            if duckduckgo is not None
+            else DuckDuckGoSearchProvider()
+        )
+        self.reddit = reddit if reddit is not None else self.brave
+        self.include_reddit = bool(include_reddit)
+        self.last_report = []
+
+    def _run_lane(
+        self,
+        *,
+        lane,
+        provider,
+        query,
+        source_class,
+    ):
+        try:
+            results = provider.search(query) or []
+        except ExternalSearchError as exc:
+            self.last_report.append({
+                "lane": lane,
+                "ok": False,
+                "count": 0,
+                "error_code": exc.code,
+                "error": str(exc),
+            })
+            return []
+        except Exception as exc:
+            self.last_report.append({
+                "lane": lane,
+                "ok": False,
+                "count": 0,
+                "error_code": "PROVIDER_ERROR",
+                "error": str(exc),
+            })
+            return []
+
+        normalised = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            copy = dict(item)
+            copy["retrieval_lane"] = lane
+            copy["source_class"] = source_class
+            if lane == "reddit":
+                copy["provider"] = str(copy.get("provider") or "brave")
+                copy["community_platform"] = "reddit"
+            normalised.append(copy)
+
+        self.last_report.append({
+            "lane": lane,
+            "ok": bool(normalised),
+            "count": len(normalised),
+            "error_code": None if normalised else "NO_USABLE_RESULTS",
+            "error": None if normalised else "No usable results.",
+        })
+        return normalised
+
+    def search(self, question: str) -> List[Dict[str, Any]]:
+        self.last_report = []
+        collected = []
+
+        collected.extend(self._run_lane(
+            lane="brave",
+            provider=self.brave,
+            query=question,
+            source_class="web",
+        ))
+
+        collected.extend(self._run_lane(
+            lane="duckduckgo",
+            provider=self.duckduckgo,
+            query=question,
+            source_class="web",
+        ))
+
+        if self.include_reddit:
+            collected.extend(self._run_lane(
+                lane="reddit",
+                provider=self.reddit,
+                query="site:reddit.com " + str(question),
+                source_class="community",
+            ))
+
+        if collected:
+            return collected
+
+        for report in self.last_report:
+            if report.get("error_code") not in {None, "NO_USABLE_RESULTS"}:
+                raise ExternalSearchError(
+                    report["error_code"],
+                    report.get("error") or "External retrieval failed.",
+                )
+
+        return []
 
 
 class ExternalRetriever:
@@ -275,7 +414,7 @@ class ExternalRetriever:
         self.provider = (
             provider
             if provider is not None
-            else BraveSearchProvider()
+            else MultiPassSearchProvider()
         )
 
     def _search(self, question: str) -> List[Dict[str, Any]]:
@@ -304,6 +443,9 @@ class ExternalRetriever:
                     else "PROVIDER_HTTP_ERROR" if isinstance(exc, requests.exceptions.HTTPError)
                     else "PROVIDER_ERROR"
                 ),
+                "provider_passes": list(
+                    getattr(self.provider, "last_report", []) or []
+                ),
             }
 
         evidence = []
@@ -329,7 +471,13 @@ class ExternalRetriever:
                 "retrieval_type": retrieval_type,
             }
 
-            for field in ("provider", "retrieved_at_utc"):
+            for field in (
+                "provider",
+                "retrieved_at_utc",
+                "retrieval_lane",
+                "source_class",
+                "community_platform",
+            ):
                 if isinstance(item.get(field), str):
                     evidence_item[field] = item[field]
 
@@ -345,9 +493,15 @@ class ExternalRetriever:
         seen = set()
 
         for item in evidence:
+            url_key = str(item.get("url") or "").casefold().strip()
             key = (
-                item["source"].casefold().strip(),
-                item["text"].casefold().strip(),
+                ("url", url_key)
+                if url_key
+                else (
+                    "content",
+                    item["source"].casefold().strip(),
+                    item["text"].casefold().strip(),
+                )
             )
 
             if key in seen:
@@ -372,6 +526,9 @@ class ExternalRetriever:
             "evidence": bounded,
             "error": None if bounded else "The provider returned no usable evidence.",
             "error_code": None if bounded else "NO_USABLE_RESULTS",
+            "provider_passes": list(
+                getattr(self.provider, "last_report", []) or []
+            ),
         }
 
 
@@ -405,6 +562,16 @@ def render_external_evidence(evidence):
 
         lines.append("")
         lines.append(f"SOURCE: {source}")
+
+        lane = str(item.get("retrieval_lane") or "").strip()
+        source_class = str(item.get("source_class") or "").strip()
+        if lane or source_class:
+            parts = []
+            if lane:
+                parts.append(f"lane={lane}")
+            if source_class:
+                parts.append(f"class={source_class}")
+            lines.append("PROVENANCE: " + " | ".join(parts))
 
         if url:
             lines.append(f"URL: {url}")

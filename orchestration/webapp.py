@@ -1759,12 +1759,32 @@ def deterministic_pmei_chat():
                 "external_retrieval_status": external_result.get("error_code") or "PROVIDER_ERROR",
                 "error_code": external_result.get("error_code") or "PROVIDER_ERROR",
                 "external_evidence_count": 0,
+                "external_provider_passes": external_result.get(
+                    "provider_passes"
+                ) or [],
             }, 503
 
         external_evidence = (
             external_result.get("evidence")
             or []
         )
+        external_provider_passes = (
+            external_result.get("provider_passes")
+            or []
+        )
+        external_lane_counts = {}
+        external_source_class_counts = {}
+        for item in external_evidence:
+            if not isinstance(item, dict):
+                continue
+            lane = str(item.get("retrieval_lane") or "unknown")
+            source_class = str(item.get("source_class") or "unknown")
+            external_lane_counts[lane] = (
+                external_lane_counts.get(lane, 0) + 1
+            )
+            external_source_class_counts[source_class] = (
+                external_source_class_counts.get(source_class, 0) + 1
+            )
 
         text_out = render_external_evidence(
             external_evidence
@@ -1789,6 +1809,9 @@ def deterministic_pmei_chat():
             "evidence_record_ids": [],
             "external_retrieval_connected": True,
             "external_evidence_count": len(external_evidence),
+            "external_provider_passes": external_provider_passes,
+            "external_lane_counts": external_lane_counts,
+            "external_source_class_counts": external_source_class_counts,
             "pmei_write_authority": "NONE",
             "promotion_authority": False,
             "verification_authority": False,

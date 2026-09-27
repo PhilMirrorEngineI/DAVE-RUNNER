@@ -13,10 +13,10 @@ class FakeProvider:
         ]
 
 
-def test_external_retriever_defaults_to_brave(monkeypatch):
+def test_external_retriever_defaults_to_multipass(monkeypatch):
     monkeypatch.setattr(
         external_retrieval,
-        "BraveSearchProvider",
+        "MultiPassSearchProvider",
         FakeProvider,
     )
 

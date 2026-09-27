@@ -70,7 +70,7 @@ class BraveTests(unittest.TestCase):
                 self.assertEqual(_brave_key(p),'file-fixture');self.assertNotIn('UNRELATED',os.environ)
             self.assertEqual(_brave_key(Path(d)/'absent'),'')
     def test_default_and_injection(self):
-        with patch('orchestration.external_retrieval.BraveSearchProvider',return_value='default'):
+        with patch('orchestration.external_retrieval.MultiPassSearchProvider',return_value='default'):
             self.assertEqual(ExternalRetriever().provider,'default')
             marker=object();self.assertIs(ExternalRetriever(marker).provider,marker)
 
