@@ -182,7 +182,7 @@ def test_conversation_keeps_existing_chat_branch(runtime, monkeypatch):
     monkeypatch.setattr(provider, "clean_output_text", lambda value:value, raising=False)
     monkeypatch.setattr(webapp.requests, "post", lambda *args, **kwargs: SimpleNamespace(
         raise_for_status=lambda:None, json=lambda:{"message":{"content":"Hello."},"done_reason":"stop"}))
-    response = client.post("/chat", data={"message":"Hello"})
+    response = client.post("/chat", data={"message":"Let's just talk about it."})
     assert response.status_code == 200
     assert response.get_json()["text"] == "Hello."
     assert engine.jobs == {}
@@ -370,7 +370,7 @@ def test_schema_keeps_conversation_and_clarification_available(ollama_runtime, a
     wire.replies = [(json.dumps({"action": action, "requested_worker": None, "question": question}), "stop")]
     if action == "CHAT":
         wire.replies.append(("Hello.", "stop"))
-    response = wire.client.post("/chat", data={"message": "Hello"})
+    response = wire.client.post("/chat", data={"message": "Let's just talk about it."})
     assert response.status_code == 200
     assert response.get_json()["text"] == (question or "Hello.")
     assert "format" in wire.calls[0]
@@ -546,3 +546,103 @@ def test_foh_initial_selector_receives_governed_task_scope():
         worker = get_worker(worker_id)
         assert worker.task_scope in provider.request.system_prompt
 
+
+
+@pytest.mark.parametrize("question", [
+    "Why do leaves change colour in autumn?",
+    "What is photosynthesis?",
+    "Explain quantum entanglement simply.",
+    "Can you explain why the sky is blue?",
+    "Tell me a joke.",
+])
+def test_obvious_general_questions_are_server_owned_foh_chat(question):
+    from orchestration.foh_chat_guard import obvious_foh_chat
+    assert obvious_foh_chat(question) is True
+
+
+@pytest.mark.parametrize("question", [
+    TASK,
+    "Review this architecture for contradictions.",
+    "Research the latest OpenAI news.",
+    "What is the current prime minister?",
+    "What has Phil been working on in PMEi?",
+    "Show me Record 106.",
+    "Can you check my API for errors?",
+    "Implement this patch and run the tests.",
+])
+def test_specialist_current_and_continuity_requests_are_not_forced_to_chat(question):
+    from orchestration.foh_chat_guard import obvious_foh_chat
+    assert obvious_foh_chat(question) is False
+
+
+def test_general_knowledge_stays_in_foh_without_worker_or_pmei(runtime, monkeypatch):
+    engine, provider, client = runtime
+
+    # If the old selector runs, it would reproduce the observed bug.
+    provider.proposal = json.dumps({
+        "action": "REQUEST_WORKER",
+        "requested_worker": "findings",
+        "question": None,
+    })
+    monkeypatch.setattr(
+        provider,
+        "clean_output_text",
+        lambda value: value,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        webapp,
+        "_foh_pmei_prepare_for_question",
+        lambda *args, **kwargs: pytest.fail(
+            "Obvious general chat must not query PMEi."
+        ),
+    )
+
+    ollama_calls = []
+
+    def local_chat(url, *, json, timeout, **kwargs):
+        assert url == "http://127.0.0.1:11434/api/chat"
+        ollama_calls.append(json)
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "message": {
+                    "content": (
+                        "Leaves change colour because chlorophyll breaks down "
+                        "as daylight decreases, revealing other pigments."
+                    )
+                },
+                "done_reason": "stop",
+            },
+        )
+
+    monkeypatch.setattr(webapp.requests, "post", local_chat)
+
+    response = client.post(
+        "/chat",
+        data={
+            "message": "Why do leaves change colour in autumn?",
+            "history": "[]",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+
+    assert body["ok"] is True
+    assert body["text"].startswith("Leaves change colour because")
+    assert body["provider"] == "ollama"
+    assert body["authority"] == "conversation_only"
+    assert body["pmei_context_used"] is False
+    assert body["pmei_write_authority"] == "NONE"
+    assert body["transition_authority"] is False
+    assert body["promotion_authority"] is False
+    assert body["verification_authority"] is False
+    assert body["validation_status"] == "NOT_APPLICABLE"
+
+    assert engine.jobs == {}
+    assert provider.calls == []
+    assert len(ollama_calls) == 1
+    assert ollama_calls[0]["messages"][-1]["content"] == (
+        "Why do leaves change colour in autumn?"
+    )
