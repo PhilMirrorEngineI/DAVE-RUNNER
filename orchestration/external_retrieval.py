@@ -1,5 +1,6 @@
 from html.parser import HTMLParser
 from typing import Any, Dict, List
+import time
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
@@ -90,10 +91,19 @@ class DuckDuckGoSearchProvider:
         timeout: int = 15,
         max_results: int = 8,
         headers=None,
+        session_factory=None,
+        warmup_delay: float = 0.6,
     ):
         self.session = session or requests.Session()
+        if session_factory is not None:
+            self.session_factory = session_factory
+        elif session is not None:
+            self.session_factory = lambda: session
+        else:
+            self.session_factory = requests.Session
         self.timeout = timeout
         self.max_results = max_results
+        self.warmup_delay = max(0.0, float(warmup_delay))
         self.headers = headers or {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -102,27 +112,56 @@ class DuckDuckGoSearchProvider:
             "Accept-Language": "en-GB,en;q=0.9",
         }
 
-    def search(self, question: str) -> List[Dict[str, Any]]:
-        response = self.session.get(
-            "https://html.duckduckgo.com/html/?q="
-            + quote_plus(question),
+    def _search_once(
+        self,
+        session,
+        question: str,
+    ) -> List[Dict[str, Any]]:
+        encoded = quote_plus(question)
+        warm_url = (
+            "https://duckduckgo.com/?q="
+            + encoded
+            + "&ia=web"
+        )
+
+        warm_response = session.get(
+            warm_url,
             timeout=self.timeout,
             headers=dict(self.headers),
         )
+        warm_response.raise_for_status()
 
+        if self.warmup_delay:
+            time.sleep(self.warmup_delay)
+
+        search_headers = dict(self.headers)
+        search_headers.update({
+            "Referer": warm_url,
+            "Sec-Fetch-Site": "same-site",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        })
+
+        response = session.get(
+            "https://html.duckduckgo.com/html/?q="
+            + encoded,
+            timeout=self.timeout,
+            headers=search_headers,
+        )
         response.raise_for_status()
 
         body = response.text
         lower = body.lower()
-        # Specific response structures; the word "challenge" in a result is valid.
+
         if any(marker in lower for marker in (
             'id="challenge-form"', "id='challenge-form'",
-            'anomaly-modal', 'anomaly.js',
+            "anomaly-modal", "anomaly.js",
         )):
             raise ExternalSearchError(
                 "PROVIDER_CHALLENGE",
                 "The search provider returned a challenge page instead of results.",
             )
+
         if getattr(response, "status_code", 200) != 200:
             raise ExternalSearchError(
                 "PROVIDER_RESPONSE_UNEXPECTED",
@@ -146,7 +185,6 @@ class DuckDuckGoSearchProvider:
             source = " ".join(
                 str(item.get("title") or "").split()
             )
-
             text = " ".join(
                 str(item.get("snippet") or "").split()
             )
@@ -156,25 +194,39 @@ class DuckDuckGoSearchProvider:
 
             from datetime import datetime, timezone
 
-            output.append(
-                {
-                    "source": source,
-                    "url": url,
-                    "text": text,
-                    "retrieval_type": "WEB_SNIPPET",
-                    "provider": "duckduckgo",
-                    "retrieval_lane": "duckduckgo",
-                    "source_class": "web",
-                    "retrieved_at_utc": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                }
-            )
+            output.append({
+                "source": source,
+                "url": url,
+                "text": text,
+                "retrieval_type": "WEB_SNIPPET",
+                "provider": "duckduckgo",
+                "retrieval_lane": "duckduckgo",
+                "source_class": "web",
+                "retrieved_at_utc": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            })
 
             if len(output) >= self.max_results:
                 break
 
         return output
+
+    def search(self, question: str) -> List[Dict[str, Any]]:
+        try:
+            return self._search_once(
+                self.session,
+                question,
+            )
+        except ExternalSearchError as exc:
+            if exc.code != "PROVIDER_CHALLENGE":
+                raise
+
+        fresh_session = self.session_factory()
+        return self._search_once(
+            fresh_session,
+            question,
+        )
 
 
 def _brave_key(env_path=None):
@@ -284,13 +336,262 @@ class BraveSearchProvider:
         return output
 
 
+class HackerNewsSearchProvider:
+    """Public Hacker News search via the HN Algolia API."""
+
+    API_URL = "https://hn.algolia.com/api/v1/search"
+
+    def __init__(
+        self,
+        session=None,
+        timeout: int = 15,
+        max_results: int = 8,
+    ):
+        self.session = session or requests.Session()
+        self.timeout = timeout
+        self.max_results = min(20, max(1, int(max_results)))
+
+    @staticmethod
+    def _clean_text(value):
+        import re
+        from html import unescape
+
+        if not isinstance(value, str):
+            return ""
+        value = re.sub(r"<[^>]*>", " ", value)
+        return " ".join(unescape(value).split())
+
+    @staticmethod
+    def _keyword_query(question: str) -> str:
+        import re
+
+        stop = {
+            "a", "an", "and", "are", "as", "at", "be", "been", "being",
+            "build", "building", "built", "by", "can", "could", "did", "do",
+            "does", "for", "from", "how", "i", "in", "into", "is", "it",
+            "me", "of", "on", "people", "the", "their", "them", "they",
+            "this", "to", "use", "using", "was", "were", "what", "when",
+            "where", "which", "who", "why", "with", "would", "you",
+        }
+        tokens = re.findall(
+            r"[A-Za-z0-9][A-Za-z0-9+#.-]*",
+            str(question or ""),
+        )
+        kept = []
+        for token in tokens:
+            lower = token.casefold()
+            if lower in stop:
+                continue
+            if len(lower) < 3 and lower not in {"ai"}:
+                continue
+            kept.append(token)
+        return " ".join(kept[:6])
+
+    def _request_hits(self, query: str):
+        try:
+            response = self.session.get(
+                self.API_URL,
+                params={
+                    "query": query,
+                    "hitsPerPage": self.max_results,
+                },
+                headers={"Accept": "application/json"},
+                timeout=self.timeout,
+            )
+        except requests.exceptions.Timeout:
+            raise ExternalSearchError(
+                "PROVIDER_TIMEOUT",
+                "Hacker News search timed out.",
+            ) from None
+        except requests.exceptions.ConnectionError:
+            raise ExternalSearchError(
+                "PROVIDER_CONNECTION_ERROR",
+                "Could not connect to Hacker News search.",
+            ) from None
+        except Exception:
+            raise ExternalSearchError(
+                "PROVIDER_ERROR",
+                "Hacker News search request failed.",
+            ) from None
+
+        status = getattr(response, "status_code", 200)
+        if status == 429:
+            raise ExternalSearchError(
+                "PROVIDER_RATE_LIMIT",
+                "Hacker News search rate limit reached.",
+            )
+        if status != 200:
+            raise ExternalSearchError(
+                "PROVIDER_HTTP_ERROR",
+                "Hacker News search returned HTTP "
+                + str(status)
+                + ".",
+            )
+
+        try:
+            body = response.json()
+        except Exception:
+            raise ExternalSearchError(
+                "PROVIDER_RESPONSE_INVALID",
+                "Hacker News search returned invalid JSON.",
+            ) from None
+
+        hits = body.get("hits") if isinstance(body, dict) else None
+        if not isinstance(hits, list):
+            raise ExternalSearchError(
+                "PROVIDER_RESPONSE_INVALID",
+                "Hacker News search returned an unexpected response.",
+            )
+
+        from datetime import datetime, timezone
+
+        retrieved = datetime.now(timezone.utc).isoformat()
+        output = []
+        seen = set()
+
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+
+            object_id = str(hit.get("objectID") or "").strip()
+            title = self._clean_text(
+                hit.get("title")
+                or hit.get("story_title")
+                or "Hacker News discussion"
+            )
+            snippet = self._clean_text(
+                hit.get("comment_text")
+                or hit.get("story_text")
+                or hit.get("title")
+                or hit.get("story_title")
+            )
+
+            raw_url = (
+                hit.get("url")
+                or hit.get("story_url")
+                or ""
+            )
+            if object_id:
+                url = (
+                    "https://news.ycombinator.com/item?id="
+                    + object_id
+                )
+            else:
+                url = str(raw_url or "").strip()
+
+            if not title or not snippet or not url:
+                continue
+
+            key = (object_id or url).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            output.append({
+                "source": "Hacker News: " + title,
+                "url": url,
+                "text": snippet,
+                "retrieval_type": "COMMUNITY_SNIPPET",
+                "provider": "hn_algolia",
+                "retrieval_lane": "hacker_news",
+                "source_class": "technical_community",
+                "community_platform": "hacker_news",
+                "provider_query": query,
+                "retrieved_at_utc": retrieved,
+            })
+
+            if len(output) >= self.max_results:
+                break
+
+        return output
+
+    def search(self, question: str) -> List[Dict[str, Any]]:
+        original = str(question or "").strip()
+        rows = self._request_hits(original)
+        if rows:
+            return rows
+
+        reduced = self._keyword_query(original)
+        if (
+            reduced
+            and reduced.casefold() != original.casefold()
+        ):
+            return self._request_hits(reduced)
+
+        return []
+
+
+class DiscordPublicSearchProvider:
+    """Public Discord discovery pages surfaced through Brave web search.
+
+    This is intentionally not Discord message search. Private/server messages
+    require Discord access and are outside this public retrieval lane.
+    """
+
+    def __init__(
+        self,
+        search_provider=None,
+        max_results: int = 8,
+    ):
+        self.search_provider = (
+            search_provider
+            if search_provider is not None
+            else BraveSearchProvider(max_results=max_results)
+        )
+        self.max_results = min(20, max(1, int(max_results)))
+
+    def search(self, question: str) -> List[Dict[str, Any]]:
+        rows = self.search_provider.search(
+            "site:discord.com " + str(question)
+        )
+
+        output = []
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+
+            url = str(item.get("url") or "").strip()
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
+
+            host = (parsed.hostname or "").casefold()
+            path = (parsed.path or "").casefold()
+
+            if host not in {"discord.com", "www.discord.com"}:
+                continue
+
+            # Keep only public server/discovery surfaces. Exclude support docs,
+            # app directory, games and account pages.
+            if not (
+                path.startswith("/invite/")
+                or path.startswith("/servers/")
+            ):
+                continue
+
+            copy = dict(item)
+            copy["retrieval_type"] = "COMMUNITY_DISCOVERY"
+            copy["provider"] = str(
+                copy.get("provider") or "brave"
+            )
+            copy["retrieval_lane"] = "discord"
+            copy["source_class"] = "community_discovery"
+            copy["community_platform"] = "discord"
+            output.append(copy)
+
+            if len(output) >= self.max_results:
+                break
+
+        return output
+
 
 class MultiPassSearchProvider:
     """Independent external retrieval passes with explicit provenance.
 
-    Brave general search is primary. DuckDuckGo HTML is opportunistic and
-    fail-closed. Reddit is retrieved through a Brave site-restricted query and
-    labelled as community evidence rather than authoritative corroboration.
+    Brave general search is primary. DuckDuckGo is opportunistic and
+    fail-closed after a bounded warm-up/retry. Reddit is a community lane.
+    Hacker News and public Discord discovery are optional per request.
     """
 
     def __init__(
@@ -298,7 +599,11 @@ class MultiPassSearchProvider:
         brave=None,
         duckduckgo=None,
         reddit=None,
+        hacker_news=None,
+        discord=None,
         include_reddit=True,
+        include_hacker_news=False,
+        include_discord=False,
     ):
         self.brave = brave if brave is not None else BraveSearchProvider()
         self.duckduckgo = (
@@ -307,7 +612,21 @@ class MultiPassSearchProvider:
             else DuckDuckGoSearchProvider()
         )
         self.reddit = reddit if reddit is not None else self.brave
+        self.hacker_news = (
+            hacker_news
+            if hacker_news is not None
+            else HackerNewsSearchProvider()
+        )
+        self.discord = (
+            discord
+            if discord is not None
+            else DiscordPublicSearchProvider(
+                search_provider=self.brave
+            )
+        )
         self.include_reddit = bool(include_reddit)
+        self.include_hacker_news = bool(include_hacker_news)
+        self.include_discord = bool(include_discord)
         self.last_report = []
 
     def _run_lane(
@@ -346,6 +665,7 @@ class MultiPassSearchProvider:
             copy = dict(item)
             copy["retrieval_lane"] = lane
             copy["source_class"] = source_class
+            copy.setdefault("provider_query", str(query))
             if lane == "reddit":
                 copy["provider"] = str(copy.get("provider") or "brave")
                 copy["community_platform"] = "reddit"
@@ -362,16 +682,16 @@ class MultiPassSearchProvider:
 
     def search(self, question: str) -> List[Dict[str, Any]]:
         self.last_report = []
-        collected = []
+        lane_buckets = []
 
-        collected.extend(self._run_lane(
+        lane_buckets.append(self._run_lane(
             lane="brave",
             provider=self.brave,
             query=question,
             source_class="web",
         ))
 
-        collected.extend(self._run_lane(
+        lane_buckets.append(self._run_lane(
             lane="duckduckgo",
             provider=self.duckduckgo,
             query=question,
@@ -379,12 +699,38 @@ class MultiPassSearchProvider:
         ))
 
         if self.include_reddit:
-            collected.extend(self._run_lane(
+            lane_buckets.append(self._run_lane(
                 lane="reddit",
                 provider=self.reddit,
                 query="site:reddit.com " + str(question),
                 source_class="community",
             ))
+
+        if self.include_hacker_news:
+            lane_buckets.append(self._run_lane(
+                lane="hacker_news",
+                provider=self.hacker_news,
+                query=question,
+                source_class="technical_community",
+            ))
+
+        if self.include_discord:
+            lane_buckets.append(self._run_lane(
+                lane="discord",
+                provider=self.discord,
+                query=question,
+                source_class="community_discovery",
+            ))
+
+        collected = []
+        max_bucket = max(
+            (len(bucket) for bucket in lane_buckets),
+            default=0,
+        )
+        for index in range(max_bucket):
+            for bucket in lane_buckets:
+                if index < len(bucket):
+                    collected.append(bucket[index])
 
         if collected:
             return collected
@@ -410,11 +756,20 @@ class ExternalRetriever:
 
     MAX_EVIDENCE = 20
 
-    def __init__(self, provider=None):
+    def __init__(
+        self,
+        provider=None,
+        *,
+        include_hacker_news=False,
+        include_discord=False,
+    ):
         self.provider = (
             provider
             if provider is not None
-            else MultiPassSearchProvider()
+            else MultiPassSearchProvider(
+                include_hacker_news=include_hacker_news,
+                include_discord=include_discord,
+            )
         )
 
     def _search(self, question: str) -> List[Dict[str, Any]]:
@@ -477,6 +832,7 @@ class ExternalRetriever:
                 "retrieval_lane",
                 "source_class",
                 "community_platform",
+                "provider_query",
             ):
                 if isinstance(item.get(field), str):
                     evidence_item[field] = item[field]

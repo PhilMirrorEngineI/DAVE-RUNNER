@@ -1718,6 +1718,39 @@ def deterministic_pmei_chat():
 
     started = time.perf_counter()
 
+    optional_external_lanes_raw = request.form.get(
+        "external_lanes",
+        "",
+    )
+    optional_external_lanes = {
+        token.strip().casefold()
+        for token in optional_external_lanes_raw.split(",")
+        if token.strip()
+    }
+    optional_external_lanes = {
+        "hacker_news" if token in {"hn", "hackernews", "hacker_news"} else token
+        for token in optional_external_lanes
+    }
+    supported_optional_lanes = {
+        "hacker_news",
+        "discord",
+    }
+    unknown_optional_lanes = (
+        optional_external_lanes
+        - supported_optional_lanes
+    )
+    if unknown_optional_lanes:
+        return {
+            "ok": False,
+            "error": (
+                "Unsupported external_lanes value(s): "
+                + ", ".join(sorted(unknown_optional_lanes))
+            ),
+            "supported_external_lanes": sorted(
+                supported_optional_lanes
+            ),
+        }, 400
+
     source_route = route_source(message)
     _, message = split_source_request(message)
     if not message:
@@ -1734,7 +1767,15 @@ def deterministic_pmei_chat():
         }, 200
 
     if source_route == WEB_LOOKUP:
-        external_result = ExternalRetriever().retrieve(
+        retriever_kwargs = {}
+        if "hacker_news" in optional_external_lanes:
+            retriever_kwargs["include_hacker_news"] = True
+        if "discord" in optional_external_lanes:
+            retriever_kwargs["include_discord"] = True
+
+        external_result = ExternalRetriever(
+            **retriever_kwargs
+        ).retrieve(
             message
         )
 
@@ -1762,6 +1803,9 @@ def deterministic_pmei_chat():
                 "external_provider_passes": external_result.get(
                     "provider_passes"
                 ) or [],
+                "external_optional_lanes_requested": sorted(
+                    optional_external_lanes
+                ),
             }, 503
 
         external_evidence = (
@@ -1810,6 +1854,9 @@ def deterministic_pmei_chat():
             "external_retrieval_connected": True,
             "external_evidence_count": len(external_evidence),
             "external_provider_passes": external_provider_passes,
+            "external_optional_lanes_requested": sorted(
+                optional_external_lanes
+            ),
             "external_lane_counts": external_lane_counts,
             "external_source_class_counts": external_source_class_counts,
             "pmei_write_authority": "NONE",

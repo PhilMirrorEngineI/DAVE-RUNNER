@@ -2,6 +2,9 @@ from orchestration import external_retrieval
 
 
 class FakeProvider:
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+
     def search(self, question):
         return [
             {
