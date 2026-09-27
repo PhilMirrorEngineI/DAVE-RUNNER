@@ -1,6 +1,11 @@
 import re
 from dataclasses import dataclass
 
+from .context_inspection import (
+    is_context_inspection_request,
+    is_personal_continuity_request,
+)
+
 
 @dataclass(frozen=True)
 class QuestionIntent:
@@ -25,6 +30,12 @@ def classify_question_intent(question: str) -> QuestionIntent:
 
     if not q:
         return QuestionIntent("UNKNOWN", "UNRESOLVED")
+
+    if is_context_inspection_request(question):
+        return QuestionIntent("CONTEXT_INSPECTION", "HISTORICAL")
+
+    if is_personal_continuity_request(question):
+        return QuestionIntent("PERSONAL_CONTINUITY", "HISTORICAL")
 
     from .progress_evidence import implementation_progress_topic
     diagnostic_topic = implementation_progress_topic(question)

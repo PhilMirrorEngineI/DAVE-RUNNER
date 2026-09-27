@@ -86,15 +86,19 @@ def build_adapter():
     return adapter
 
 
-def test_ordinary_question_uses_normal_retrieval_only():
+def test_explicit_named_record_inspection_uses_historical_retrieval():
     adapter = build_adapter()
 
     adapter.prepare(
         "What does Record 204 say?"
     )
 
-    assert adapter.notepad.normal_calls == 1
-    assert adapter.notepad.historical_calls == 0
+    # Records 308-310 later supersede the old ordinary semantic-routing
+    # expectation: an explicit named-record inspection must traverse the
+    # governed historical continuity surface so the named record cannot be
+    # silently replaced by a nearer semantic match.
+    assert adapter.notepad.normal_calls == 0
+    assert adapter.notepad.historical_calls == 1
 
 
 def test_explicit_full_historical_scan_uses_historical_retrieval():

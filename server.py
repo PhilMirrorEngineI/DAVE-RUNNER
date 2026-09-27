@@ -421,6 +421,57 @@ def historical_store_diagnostic_route():
             "coverage": "UNVERIFIED",
         }), 503
 
+@app.route("/memory/continuity/audit", methods=["POST"])
+def continuity_audit_route():
+    """Read-only deterministic continuity self-audit."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    from orchestration.continuity_audit import audit_continuity_records
+
+    try:
+        requested_limit = int(data.get("limit") or 1000)
+    except (TypeError, ValueError):
+        return fail("limit must be an integer", 400)
+
+    limit = min(max(requested_limit, 1), 5000)
+    user = owner_user_id()
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM continuity_records WHERE user_id=%s;",
+                (user,),
+            )
+            total_records = int(cur.fetchone()[0] or 0)
+
+            cur.execute(
+                CONTINUITY_SELECT
+                + " WHERE user_id=%s "
+                  "ORDER BY timestamp DESC, id DESC LIMIT %s;",
+                (user, limit),
+            )
+            rows = cur.fetchall()
+
+        records = [
+            continuity_row_to_item(row)
+            for row in rows
+        ]
+        result = audit_continuity_records(records)
+        result["total_records"] = total_records
+        result["limit"] = limit
+        result["exhaustive"] = len(records) >= total_records
+
+        return ok(result)
+    except Exception:
+        return fail("Continuity audit unavailable", 503)
+
+
 @app.route("/health")
 @app.route("/healthz")
 def health():
@@ -882,6 +933,92 @@ def action_test_state_get():
         })
     except Exception as exc:
         return fail(f"Test-state retrieval error: {exc}", 500)
+
+
+@app.route("/memory/action/verify", methods=["POST"])
+def action_test_state_verify():
+    """M4 read-only expected-versus-actual verification.
+
+    This route independently reads persisted test state. It does not consume
+    the executor's response and has no mutation, promotion, or human-approval
+    authority.
+    """
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    state_key = (data.get("state_key") or "").strip()
+    expected_action_id = (data.get("expected_action_id") or "").strip()
+    expected_value_supplied = "expected_value" in data
+    expected_value = data.get("expected_value")
+
+    if not state_key:
+        return fail("state_key required", 400)
+    if not expected_value_supplied:
+        return fail("expected_value required", 400)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT state_key, value, version, updated_at, last_action_id
+                FROM action_test_state
+                WHERE user_id=%s AND state_key=%s;
+                """,
+                (owner_user_id(), state_key)
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return ok({
+                "contract": "m4_independent_state_verification_v1",
+                "verified": False,
+                "found": False,
+                "state_key": state_key,
+                "expected_value": expected_value,
+                "expected_action_id": expected_action_id or None,
+                "mismatch_reasons": ["state_not_found"],
+                "mutation_authority": False,
+                "promotion_authority": False,
+                "human_approval_authority": False,
+            })
+
+        actual = {
+            "state_key": row[0],
+            "value": row[1],
+            "version": row[2],
+            "updated_at": str(row[3]),
+            "last_action_id": row[4],
+        }
+
+        mismatch_reasons = []
+        if actual["value"] != expected_value:
+            mismatch_reasons.append("value_mismatch")
+        if (
+            expected_action_id
+            and actual["last_action_id"] != expected_action_id
+        ):
+            mismatch_reasons.append("action_id_mismatch")
+
+        return ok({
+            "contract": "m4_independent_state_verification_v1",
+            "verified": not mismatch_reasons,
+            "found": True,
+            "state_key": state_key,
+            "expected_value": expected_value,
+            "expected_action_id": expected_action_id or None,
+            "actual_state": actual,
+            "mismatch_reasons": mismatch_reasons,
+            "mutation_authority": False,
+            "promotion_authority": False,
+            "human_approval_authority": False,
+        })
+    except Exception:
+        return fail("Independent state verification unavailable", 503)
 
 
 @app.route("/memory/action/audit", methods=["POST"])

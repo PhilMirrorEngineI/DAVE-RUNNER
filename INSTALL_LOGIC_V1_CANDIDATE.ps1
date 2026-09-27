@@ -58,9 +58,9 @@ if ($productionTracked -or $productionStaged) {
     throw "Production has tracked/staged changes. Refusing to overlay candidate."
 }
 
-$files = & git -C $CandidateRoot diff --name-only "$ExpectedProductionHead..HEAD" -- orchestration
+$files = & git -C $CandidateRoot diff --name-only "$ExpectedProductionHead..HEAD" -- server.py orchestration
 if ($LASTEXITCODE -ne 0 -or -not $files) {
-    throw "Could not derive reviewed orchestration delta."
+    throw "Could not derive reviewed server/orchestration delta."
 }
 $files = @($files | Where-Object { $_ -and $_ -notmatch '(^|/)__pycache__/' })
 
@@ -165,4 +165,4 @@ Write-Host "Backup: $BackupRoot"
 Write-Host "No Git commit, merge, push, deployment, server restart, human decision, or PMEi write was performed."
 Write-Host "The running server must be restarted separately with its existing environment before live acceptance."
 Write-Host ""
-& git -C $ProductionRoot status --short -- orchestration
+& git -C $ProductionRoot status --short -- server.py orchestration

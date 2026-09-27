@@ -168,6 +168,33 @@ def subject_tokens(question: str) -> Tuple[str, ...]:
         "from",
     }
 
+    personal_continuity_non_subject_terms = {
+        "i",
+        "me",
+        "my",
+        "mine",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "have",
+        "has",
+        "had",
+        "with",
+        "up",
+        "lately",
+        "recently",
+        "last",
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "month",
+        "months",
+        "year",
+        "years",
+    }
+
     change_comparison_non_subject_terms = {
         "change",
         "changed",
@@ -241,6 +268,13 @@ def subject_tokens(question: str) -> Tuple[str, ...]:
 
         if intent.intent == "LINEAGE":
             if token in lineage_non_subject_terms:
+                continue
+
+        if intent.intent == "PERSONAL_CONTINUITY":
+            if token in personal_continuity_non_subject_terms:
+                continue
+
+            if token.isdigit():
                 continue
 
         if intent.intent == "CHANGE_COMPARISON":

@@ -51,6 +51,10 @@ from .evidence_qualification import (
 from .question_intent import (
     classify_question_intent,
 )
+from .context_inspection import (
+    extract_explicit_record_ids,
+    is_first_person_continuity_request,
+)
 
 
 # =============================================================================
@@ -419,6 +423,10 @@ class PMEiEvidenceAdapter:
             request_context.operation == "ACTIVITY_HISTORY"
             and not request_context.ready
             and question_intent_for_retrieval.intent != "PROGRESS_HISTORY"
+            and not (
+                question_intent_for_retrieval.intent == "PERSONAL_CONTINUITY"
+                and is_first_person_continuity_request(question)
+            )
         ):
             return {
                 "ok": False, "stage": "request_interpretation",
@@ -447,7 +455,11 @@ class PMEiEvidenceAdapter:
 
         historical = (
             effective_request_context.ready
-            or question_intent_for_retrieval.intent == "PROGRESS_HISTORY"
+            or question_intent_for_retrieval.intent in {
+                "PROGRESS_HISTORY",
+                "PERSONAL_CONTINUITY",
+                "CONTEXT_INSPECTION",
+            }
             or self.historical_scan_requested(question)
         )
         mode = (
@@ -648,6 +660,86 @@ class PMEiEvidenceAdapter:
             "candidates": candidates,
             "error": None,
         }
+
+    def prepare_context_inspection(
+        self,
+        question: str,
+    ) -> EvidencePacket:
+        """Retrieve explicitly named records for read-only inspection.
+
+        This path intentionally bypasses task-alignment promotion. A record is
+        shown because the user named it, while its stored seal/provenance remains
+        intact for the renderer.
+        """
+        retrieval = self.retrieve_candidates(question)
+        question = retrieval.get("question", str(question or "").strip())
+        query = retrieval.get("query", "")
+        records = retrieval.get("records", [])
+        transport = dict(retrieval.get("transport", {}) or {})
+
+        if not retrieval.get("ok"):
+            return EvidencePacket(
+                question=question,
+                query=query,
+                transport=transport,
+                records_received=len(records) if isinstance(records, list) else 0,
+                evidence_count=0,
+                retrieval_ok=False,
+                error=retrieval.get("error"),
+            )
+
+        requested = extract_explicit_record_ids(question)
+        by_id = {
+            str(record.get("id")): record
+            for record in records
+            if isinstance(record, dict) and record.get("id") is not None
+        }
+
+        evidence = []
+        for record_id in requested:
+            record = by_id.get(str(record_id))
+            if record is None:
+                continue
+            human_brief = record.get("human_brief")
+            if not isinstance(human_brief, dict):
+                human_brief = {}
+            evidence.append({
+                "record_id": record.get("id"),
+                "source": "PMEi",
+                "retrieval_type": "EXPLICIT_RECORD_INSPECTION",
+                "pmei_route": "/memory/continuity/get",
+                "text": self.notepad.record_text(record),
+                "seal": record.get("seal"),
+                "session_ref": record.get("session_ref"),
+                "save_id": record.get("save_id"),
+                "timestamp": record.get("timestamp"),
+                "human_title": human_brief.get("title"),
+                "task_alignment": "CONTEXTUAL_INSPECTION",
+                "proposition_type": "TOPIC_ONLY",
+                "temporal_scope": "HISTORICAL",
+                "evidence_role": "CONTEXTUAL_INSPECTION",
+                "learning_layer": record.get("learning_layer") or {},
+            })
+
+        matched_ids = {str(item.get("record_id")) for item in evidence}
+        missing = [record_id for record_id in requested if record_id not in matched_ids]
+        transport["explicit_record_targets"] = list(requested)
+        transport["explicit_record_matches"] = [
+            item.get("record_id") for item in evidence
+        ]
+        transport["explicit_record_missing"] = missing
+        transport["inspection_only"] = True
+
+        return EvidencePacket(
+            question=question,
+            query=query,
+            evidence=evidence,
+            transport=transport,
+            records_received=len(records),
+            evidence_count=len(evidence),
+            retrieval_ok=True,
+            error=None,
+        )
 
     # -------------------------------------------------------------------------
     # EVIDENCE PREPARATION

@@ -1118,6 +1118,7 @@ Return only the evidence-bounded work product for your active worker role.
                     or []
                 ),
                 "error": external_result.get("error"),
+                "error_code": external_result.get("error_code"),
             }
 
         else:

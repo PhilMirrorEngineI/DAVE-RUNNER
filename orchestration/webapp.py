@@ -26,6 +26,7 @@ from orchestration.foh_initial_request import InitialRequestError, propose_initi
 from orchestration.output_validator import WorkerOutputValidator
 from orchestration.deterministic_answer import render_deterministic_answer
 from orchestration.question_intent import classify_question_intent
+from orchestration.context_inspection import render_context_inspection
 from orchestration.relationship_bridge import translate_governed_evidence
 from orchestration.deterministic_relationship_engine import run_relationship_engine
 from orchestration.evidence_adapter import PMEiEvidenceAdapter
@@ -1790,9 +1791,18 @@ def deterministic_pmei_chat():
             archive_search=True,
         )
 
-        prepared = adapter.prepare(
+        deterministic_intent = classify_question_intent(
             message
         )
+
+        if deterministic_intent.intent == "CONTEXT_INSPECTION":
+            prepared = adapter.prepare_context_inspection(
+                message
+            )
+        else:
+            prepared = adapter.prepare(
+                message
+            )
 
         if not prepared.retrieval_ok:
             return {
@@ -1850,10 +1860,6 @@ def deterministic_pmei_chat():
             )
         )
 
-        deterministic_intent = classify_question_intent(
-            message
-        )
-
         relationship_mode = (
             deterministic_intent.intent
             in {
@@ -1863,12 +1869,26 @@ def deterministic_pmei_chat():
                 "DECISION",
                 "LINEAGE",
                 "CHANGE_COMPARISON",
+                "PERSONAL_CONTINUITY",
             }
         )
 
         relationship_selected_ids = []
 
-        if relationship_mode:
+        if deterministic_intent.intent == "CONTEXT_INSPECTION":
+            authority_classifier = (
+                build_worker_packet_builder()
+                .evidence_authority_class
+            )
+            text_out = render_context_inspection(
+                prepared.evidence,
+                authority_classifier,
+            )
+            relationship_selected_ids = [
+                item.get("record_id")
+                for item in prepared.evidence
+            ]
+        elif relationship_mode:
             authority_classifier = (
                 build_worker_packet_builder()
                 .evidence_authority_class

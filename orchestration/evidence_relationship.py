@@ -68,6 +68,21 @@ def evidence_permitted_for_intent(
             )
         )
 
+    if intent.intent == "PERSONAL_CONTINUITY":
+        return (
+            (
+                kind in {
+                    "STATE",
+                    "EVENT",
+                    "DECISION",
+                    "LINEAGE",
+                    "ORIGIN",
+                }
+                and time == "HISTORICAL"
+            )
+            or qualification == "ATTRIBUTED_ACTION_CANDIDATE"
+        )
+
     if intent.intent == "CURRENT_STATE":
         return (
             kind == "STATE"

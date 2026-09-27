@@ -139,6 +139,7 @@ class WorkerPacket:
     rendered_text: str = ""
 
     error: str = ""
+    error_code: str = ""
 
     contextual_recall: bool = False
 
@@ -1391,6 +1392,12 @@ class PMEiWorkerPacketBuilder:
                 packet.error,
             ])
 
+            if packet.error_code:
+                lines.append(
+                    "RETRIEVAL ERROR CODE: "
+                    + packet.error_code
+                )
+
         return "\n".join(
             lines
         ).strip()
@@ -2188,6 +2195,12 @@ class PMEiWorkerPacketBuilder:
                     "error"
                 )
             ),
+
+            error_code=self.clean_text(
+                evidence_packet.get(
+                    "error_code"
+                )
+            ).upper(),
         )
 
         packet.rendered_text = self.render(

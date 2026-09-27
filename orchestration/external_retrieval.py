@@ -179,7 +179,7 @@ def _brave_key(env_path=None):
         if line.startswith("export "):
             line = line[7:].strip()
         key, sep, value = line.partition("=")
-        if sep and key.strip() == "BRAVE_API_KEY":
+        if sep and key.strip() in {"BRAVE_API_KEY", "BRAVE_SEARCH_API_KEY"}:
             value = value.strip()
             if value.startswith(('"', "'")):
                 quote = value[0]

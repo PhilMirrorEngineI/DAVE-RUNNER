@@ -81,11 +81,10 @@ def _render_supported(
             event_date = item.event_date or "UNRESOLVED"
 
             lines.append(
-                f"- [{item.record_id}] "
-                f"QUALIFICATION: {qualification} | "
-                f"EVENT TIME POSITION: {time_position} | "
-                f"EVENT DATE: {event_date} | "
-                f"{item.text}"
+                f"- [{item.record_id}] {item.text} "
+                f"(qualification: {qualification}; "
+                f"event time: {time_position}; "
+                f"event date: {event_date})"
             )
         else:
             lines.append(
@@ -121,15 +120,17 @@ def answer_from_evidence(
         supported,
     )
 
-    text = (
-        "DETERMINISTIC RELATIONSHIP ANSWER\n\n"
-        f"QUESTION TYPE: {intent.intent}\n"
-        f"TEMPORAL SCOPE: {intent.temporal_scope}\n\n"
-        "SUPPORTED EVIDENCE\n"
-        f"{body}\n\n"
-        "INFERENCE\n"
-        "No model inference performed."
-    )
+    if supported:
+        text = (
+            "From the eligible continuity evidence:\n"
+            f"{body}\n\n"
+            "No model inference performed."
+        )
+    else:
+        text = (
+            f"{body}\n\n"
+            "No model inference performed."
+        )
 
     return DeterministicRelationshipAnswer(
         question=question,

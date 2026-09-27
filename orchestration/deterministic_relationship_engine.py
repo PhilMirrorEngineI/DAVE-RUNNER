@@ -14,6 +14,7 @@ from orchestration.evidence_relationship import (
 from orchestration.subject_binding import (
     select_subject_bound_evidence,
     select_subject_relevant_evidence,
+    subject_tokens,
 )
 from orchestration.deterministic_relationship_answer import (
     DeterministicRelationshipAnswer,
@@ -189,6 +190,14 @@ def _apply_subject_binding(
             return ()
 
         return select_subject_bound_evidence(
+            question,
+            evidence,
+        )
+
+    if intent.intent == "PERSONAL_CONTINUITY":
+        if not subject_tokens(question):
+            return evidence
+        return select_subject_relevant_evidence(
             question,
             evidence,
         )
