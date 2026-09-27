@@ -11,7 +11,7 @@ Authority basis reviewed: PMEi records 89, 111, 134, 177, 184, 192, 206, 210, 21
 
 Final candidate orchestration suite:
 
-- **937 passed**
+- **938 passed**
 - **95 subtests passed**
 - **1 skipped**
 
@@ -42,9 +42,9 @@ copying, and automatically restores the backup on verification failure.
 The installer deliberately does not restart the server, create a Git commit,
 merge/push/deploy, submit a human decision, or write PMEi continuity.
 
-Its latest dry run was executed successfully against candidate commit
-`e157791f9b8334a968ae94dafec44e6a451a5ab3`. It identified **53 reviewed
-server/orchestration files**, reran **937 passed / 1 skipped / 95 subtests**,
+Its latest dry run is executed against the current clean, pushed candidate
+branch. It identified **53 reviewed server/orchestration files**, reran
+**938 passed / 1 skipped / 95 subtests**,
 then exited with `DRY RUN COMPLETE. Nothing was installed.`
 
 ## Historical API archaeology follow-through
@@ -69,11 +69,14 @@ Candidate-verified follow-through now includes:
   duplicate-looking records, lexical constraint-conflict candidates and open
   thread pressure with explicit coverage/exhaustiveness, but has no mutation,
   canonicalisation or verification authority;
-- M3 service-contract acceptance for exact human-authorised execution, one-time
-  replay rejection, altered-payload/hash rejection and append-only audit;
+- M3 service-contract acceptance for separate human-key enforcement, exact
+  human-authorised execution, one-time replay rejection, altered-payload/hash
+  rejection and append-only audit;
 - M4 `m4_independent_state_verification_v1`, which independently reads the
   persisted test state and compares expected versus actual without trusting the
-  executor's success response and without mutation/promotion/human authority.
+  executor's success response; regression also proves verification itself does
+  not mutate test state, action state or audit state and has no
+  mutation/promotion/human authority.
 
 The M3/M4 proof above is a **service-contract regression proof** using the real
 Flask route functions with isolated persistence. It is not claimed as a deployed
