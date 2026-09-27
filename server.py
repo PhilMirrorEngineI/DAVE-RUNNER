@@ -16,6 +16,8 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from psycopg.types.json import Jsonb
+from orchestration.contracts import OrchestrationJob, WorkerResult
+from orchestration.engine import OrchestrationEngine
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -40,6 +42,16 @@ except Exception:
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+
+# PMEi deterministic worker orchestration.
+#
+# Initial integration is deliberately process-local.
+# The orchestration engine owns deterministic worker state transitions only.
+# It does not persist continuity, perform worker reasoning, manufacture human
+# approval, or implement candidate code automatically.
+#
+# Persistence and durable orchestration state remain separate concerns.
+orchestration_engine = OrchestrationEngine()
 
 
 def ok(data=None, **extra):
@@ -430,6 +442,58 @@ def historical_store_coverage_route():
             "error": "Historical store coverage unavailable",
             "coverage": "UNVERIFIED",
         }), 503
+
+
+@app.route("/memory/continuity/audit", methods=["POST"])
+def continuity_audit_route():
+    """Read-only deterministic continuity self-audit."""
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    from orchestration.continuity_audit import audit_continuity_records
+
+    try:
+        requested_limit = int(data.get("limit") or 1000)
+    except (TypeError, ValueError):
+        return fail("limit must be an integer", 400)
+
+    limit = min(max(requested_limit, 1), 5000)
+    user = owner_user_id()
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM continuity_records WHERE user_id=%s;",
+                (user,),
+            )
+            total_records = int(cur.fetchone()[0] or 0)
+
+            cur.execute(
+                CONTINUITY_SELECT
+                + " WHERE user_id=%s "
+                  "ORDER BY timestamp DESC, id DESC LIMIT %s;",
+                (user, limit),
+            )
+            rows = cur.fetchall()
+
+        records = [
+            continuity_row_to_item(row)
+            for row in rows
+        ]
+        result = audit_continuity_records(records)
+        result["total_records"] = total_records
+        result["limit"] = limit
+        result["exhaustive"] = len(records) >= total_records
+
+        return ok(result)
+    except Exception:
+        return fail("Continuity audit unavailable", 503)
+
 
 @app.route("/health")
 @app.route("/healthz")
@@ -892,6 +956,92 @@ def action_test_state_get():
         })
     except Exception as exc:
         return fail(f"Test-state retrieval error: {exc}", 500)
+
+
+@app.route("/memory/action/verify", methods=["POST"])
+def action_test_state_verify():
+    """M4 read-only expected-versus-actual verification.
+
+    This route independently reads persisted test state. It does not consume
+    the executor's response and has no mutation, promotion, or human-approval
+    authority.
+    """
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    state_key = (data.get("state_key") or "").strip()
+    expected_action_id = (data.get("expected_action_id") or "").strip()
+    expected_value_supplied = "expected_value" in data
+    expected_value = data.get("expected_value")
+
+    if not state_key:
+        return fail("state_key required", 400)
+    if not expected_value_supplied:
+        return fail("expected_value required", 400)
+
+    try:
+        with get_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT state_key, value, version, updated_at, last_action_id
+                FROM action_test_state
+                WHERE user_id=%s AND state_key=%s;
+                """,
+                (owner_user_id(), state_key)
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return ok({
+                "contract": "m4_independent_state_verification_v1",
+                "verified": False,
+                "found": False,
+                "state_key": state_key,
+                "expected_value": expected_value,
+                "expected_action_id": expected_action_id or None,
+                "mismatch_reasons": ["state_not_found"],
+                "mutation_authority": False,
+                "promotion_authority": False,
+                "human_approval_authority": False,
+            })
+
+        actual = {
+            "state_key": row[0],
+            "value": row[1],
+            "version": row[2],
+            "updated_at": str(row[3]),
+            "last_action_id": row[4],
+        }
+
+        mismatch_reasons = []
+        if actual["value"] != expected_value:
+            mismatch_reasons.append("value_mismatch")
+        if (
+            expected_action_id
+            and actual["last_action_id"] != expected_action_id
+        ):
+            mismatch_reasons.append("action_id_mismatch")
+
+        return ok({
+            "contract": "m4_independent_state_verification_v1",
+            "verified": not mismatch_reasons,
+            "found": True,
+            "state_key": state_key,
+            "expected_value": expected_value,
+            "expected_action_id": expected_action_id or None,
+            "actual_state": actual,
+            "mismatch_reasons": mismatch_reasons,
+            "mutation_authority": False,
+            "promotion_authority": False,
+            "human_approval_authority": False,
+        })
+    except Exception:
+        return fail("Independent state verification unavailable", 503)
 
 
 @app.route("/memory/action/audit", methods=["POST"])
@@ -2522,6 +2672,137 @@ Rules:
         learning_events=[f"{benchmark_id} benchmark execution completed"],
         anchors=[benchmark_id, "benchmark_run", benchmark_type, "state_recovery", "CPV", cpv]
     ))
+
+
+
+# -----------------------------------------------------------------------------
+# DETERMINISTIC WORKER ORCHESTRATION HTTP BRIDGE
+# -----------------------------------------------------------------------------
+
+def orchestration_payload(value):
+    """Return a JSON-safe representation of an orchestration contract/state object."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "dict"):
+        return value.dict()
+    if hasattr(value, "__dict__"):
+        return {
+            key: orchestration_payload(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [orchestration_payload(item) for item in value]
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def call_orchestration_method(method_names, *args):
+    """Call the first compatible engine method from a narrow compatibility set."""
+    last_type_error = None
+    for method_name in method_names:
+        method = getattr(orchestration_engine, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method(*args)
+        except TypeError as exc:
+            last_type_error = exc
+            continue
+
+    if last_type_error is not None:
+        raise last_type_error
+    raise AttributeError(
+        "OrchestrationEngine does not expose any compatible method: "
+        + ", ".join(method_names)
+    )
+
+
+def build_orchestration_contract(contract_type, data):
+    """Construct a contract without weakening validation in contracts.py."""
+    try:
+        return contract_type(**data)
+    except TypeError:
+        # Dataclass-style and Pydantic-style contracts both normally accept
+        # keyword arguments. If a contract intentionally accepts a single
+        # payload object, preserve that implementation too.
+        return contract_type(data)
+
+
+@app.route("/orchestration/job/create", methods=["POST"])
+def orchestration_job_create():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    try:
+        job = build_orchestration_contract(OrchestrationJob, data)
+        result = call_orchestration_method(
+            ("create_job", "submit_job", "register_job"),
+            job
+        )
+        return ok(orchestration_payload(result if result is not None else job))
+    except (TypeError, ValueError, KeyError) as exc:
+        return fail(f"Invalid orchestration job: {exc}", 400)
+    except Exception as exc:
+        return fail(f"Orchestration job creation error: {exc}", 500)
+
+
+@app.route("/orchestration/job/<job_id>", methods=["GET"])
+def orchestration_job_get(job_id):
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return fail("job_id required", 400)
+
+    try:
+        result = call_orchestration_method(
+            ("get_job", "job_status", "get_state"),
+            job_id
+        )
+        if result is None:
+            return fail("Orchestration job not found", 404)
+        return ok(orchestration_payload(result))
+    except (KeyError, LookupError):
+        return fail("Orchestration job not found", 404)
+    except Exception as exc:
+        return fail(f"Orchestration job retrieval error: {exc}", 500)
+
+
+@app.route("/orchestration/result/submit", methods=["POST"])
+def orchestration_result_submit():
+    auth_err = require_memory_auth()
+    if auth_err:
+        return auth_err
+
+    data, err = get_json()
+    if err:
+        return err
+
+    try:
+        worker_result = build_orchestration_contract(WorkerResult, data)
+        result = call_orchestration_method(
+            ("submit_result", "record_result", "accept_result"),
+            worker_result
+        )
+        return ok(orchestration_payload(result if result is not None else worker_result))
+    except (TypeError, ValueError, KeyError) as exc:
+        return fail(f"Invalid worker result: {exc}", 400)
+    except Exception as exc:
+        return fail(f"Orchestration result submission error: {exc}", 500)
+
 
 
 @app.route("/memory/export", methods=["POST"])

@@ -1,0 +1,51 @@
+PMEi Human Gate Resume v1 — CANDIDATE ONLY
+
+Purpose
+Align the build-required orchestration path with PMEi record 363 without
+changing the installed production source.
+
+Governed order
+Engineering READY_FOR_BUILD
+-> Knobhead independent pre-build challenge
+-> HUMAN_GATE / AWAITING_HUMAN
+-> explicit human decision
+-> Builder only after AUTHORIZE_BUILD
+-> Knobhead post-build review
+-> HUMAN_GATE
+
+No conversational text, provider output, validator ACCEPT, or worker result
+can manufacture the human decision.
+Human decisions
+AUTHORIZE_BUILD: activates Builder for the already-reviewed bounded scope.
+REJECT_BUILD: terminates the proposed build.
+AMEND_BUILD: requires a human note and returns to Engineering.
+CLOSE: closes a human gate without starting another worker.
+
+Continuation
+AutomaticContinuation.start() remains one-attempt and non-replaying.
+resume_after_human_decision() is a separate bounded operation.
+It requires a persisted explicit human decision and a prior STOPPED /
+AWAITING_HUMAN journal. The previous journal is archived and a distinct
+human-resume claim prevents duplicate execution.
+
+HTTP boundary
+POST /orchestration/jobs/<job_id>/human-decision
+JSON: {"decision":"AUTHORIZE_BUILD|REJECT_BUILD|AMEND_BUILD|CLOSE","note":"..."}
+This route is separate from /chat and /orchestration/request-worker.
+Verification on DadsPC — 2026-09-26
+Focused human-gate tests: 8 passed.
+Focused orchestration regression: 113 passed.
+Complete candidate orchestration suite:
+888 passed, 1 deselected, 95 subtests passed.
+
+The single deselected test is:
+test_substantive_governed_learning_survives_bounded_selection
+
+That test was run independently against untouched production and failed there
+with the same assertion, so it is not a regression introduced by this
+candidate. It depends on the current live PMEi learning/evidence surface.
+
+Production installation status
+NOT INSTALLED.
+No production Python source was edited by this candidate work.
+No live worker/model execution was used to validate the candidate.
