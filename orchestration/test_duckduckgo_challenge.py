@@ -16,7 +16,7 @@ class ChallengeResponse:
 
 class ChallengeSession:
 
-    def get(self, url, timeout=None):
+    def get(self, url, timeout=None, headers=None):
         return ChallengeResponse()
 
 
