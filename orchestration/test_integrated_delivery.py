@@ -75,7 +75,8 @@ def test_existing_page_assets_identity_and_deterministic_path_survive_polling():
     assert "FRONT-OF-HOUSE DAVE" in page
     assert "status_url" in page
     assert page.count("async function sendChat(){") == 1
-    assert "textContent=d.delivery?.text||d.text||d.error" in page
+    assert "textContent=d.foh_presentation?.text||d.text||d.delivery?.text||d.error" in page
+    assert "const answer=data.foh_presentation?.text||data.text||data.delivery?.text" in page
     assert "chatHistory.push" in page
 
 

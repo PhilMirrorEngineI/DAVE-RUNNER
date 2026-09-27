@@ -127,7 +127,12 @@ def test_specialist_round_trip_returns_recorded_candidate_through_foh(
     body = returned.get_json()
     assert body["job_id"] == job_id
     assert body["answer_owner"] == role
-    assert provider.work in body["text"]
+    assert body["presentation_owner"] == "foh"
+    assert provider.work == body["raw_specialist_answer"]
+    assert "candidate assessment is available for human review." in body["text"]
+    assert "UNVERIFIED:" not in body["text"]
+    assert body["foh_presentation"]["presentation_only"] is True
+    assert body["foh_presentation"]["answer_owner"] == role
     assert body["human_approved"] is False
     assert body["semantic_synthesis_performed"] is False
     assert body["transition_authority"] is False
