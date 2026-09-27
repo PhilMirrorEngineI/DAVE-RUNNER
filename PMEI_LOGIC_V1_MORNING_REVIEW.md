@@ -5,13 +5,13 @@ Canonical: **NO**
 Production installed: **NO**
 Human approval recorded: **NO**
 
-Authority basis reviewed: PMEi records 89, 134, 177, 361, 362, 363, 367–373.
+Authority basis reviewed: PMEi records 89, 111, 134, 177, 184, 192, 206, 210, 211, 308–312, 361–375.
 
 ## Verification result
 
 Final candidate orchestration suite:
 
-- **926 passed**
+- **937 passed**
 - **95 subtests passed**
 - **1 skipped**
 
@@ -35,16 +35,63 @@ Three reviewed operational scripts are included:
 
 The installer refuses the wrong production HEAD, dirty tracked/staged production,
 the wrong candidate branch, or a dirty candidate worktree. It derives the exact
-reviewed orchestration delta, runs the complete candidate suite before copying,
+reviewed server/orchestration delta, runs the complete candidate suite before copying,
 backs up every touched production file, runs the complete production suite after
 copying, and automatically restores the backup on verification failure.
 
 The installer deliberately does not restart the server, create a Git commit,
 merge/push/deploy, submit a human decision, or write PMEi continuity.
 
-Its dry run was executed successfully. It identified **38 reviewed orchestration
-files**, reran **926 passed / 1 skipped / 95 subtests**, then exited with
-`DRY RUN COMPLETE. Nothing was installed.`
+Its latest dry run was executed successfully against candidate commit
+`e157791f9b8334a968ae94dafec44e6a451a5ab3`. It identified **53 reviewed
+server/orchestration files**, reran **937 passed / 1 skipped / 95 subtests**,
+then exited with `DRY RUN COMPLETE. Nothing was installed.`
+
+## Historical API archaeology follow-through
+
+The read-only historical continuity review identified a small number of older
+ideas that were still useful and deliberately left broader/deferred ideas alone.
+
+Candidate-verified follow-through now includes:
+
+- natural `PERSONAL_CONTINUITY` routing for generic named-subject and
+  first-person continuity requests without inventing identity;
+- exact `CONTEXT_INSPECTION` for explicitly named continuity records, using
+  historical traversal and exact record IDs rather than semantic substitution;
+- read-only rendering that preserves seal/provenance and explicitly states that
+  inspection does not promote material to verified/current/canonical state;
+- a more human-readable deterministic relationship renderer while preserving
+  qualification/event-date semantics and zero-LLM behaviour;
+- `BRAVE_API_KEY` and `BRAVE_SEARCH_API_KEY` parity in local .env loading;
+- typed external retrieval `error_code` preserved through the governed worker
+  packet;
+- `continuity_self_audit_v1`, a read-only continuity audit that reports
+  duplicate-looking records, lexical constraint-conflict candidates and open
+  thread pressure with explicit coverage/exhaustiveness, but has no mutation,
+  canonicalisation or verification authority;
+- M3 service-contract acceptance for exact human-authorised execution, one-time
+  replay rejection, altered-payload/hash rejection and append-only audit;
+- M4 `m4_independent_state_verification_v1`, which independently reads the
+  persisted test state and compares expected versus actual without trusting the
+  executor's success response and without mutation/promotion/human authority.
+
+The M3/M4 proof above is a **service-contract regression proof** using the real
+Flask route functions with isolated persistence. It is not claimed as a deployed
+positive mutation proof. The live PMEi service reports human-approval
+authentication configured, but the local test shell does not contain the
+service/human approval credentials and the candidate server routes have not
+been installed/deployed.
+
+Intentionally still deferred from the archaeology review:
+
+- native worker/provider provenance fields on future continuity writes;
+- concept/graph migration and broader canonical relationship schema;
+- automatic continuity synthesis;
+- OCR/screenshot lineage inference;
+- mixed PMEi+WEB reasoning redesign;
+- recursive/adaptive Candidate17-style reasoning;
+- protected-write M3/M4 **deployed** acceptance until the reviewed server code
+  is installed and an authorised live test surface is available.
 
 ## Checklist state
 
@@ -178,6 +225,8 @@ This candidate does **not**:
 - install itself into production;
 - record Phil's approval;
 - execute a live Builder job;
+- execute a deployed/live positive M3 protected mutation;
+- claim deployed M4 independent verification;
 - mutate PMEi continuity through Steward;
 - deploy/merge/promote anything;
 - claim final Logic Contract v1 canonical status;
